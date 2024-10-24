@@ -127,6 +127,9 @@ class Rdb_cf_manager : public Ensure_initialized {
 
   bool is_tmp_column_family(const uint cf_id) const;
 
+  /* Used by bulk load */
+  void drop_cf_from_map(const std::string &cf_name, const uint32_t cf_id);
+
  private:
   std::shared_ptr<rocksdb::ColumnFamilyHandle> get_cf(
       const std::string &cf_name, const bool lock_held_by_caller) const;

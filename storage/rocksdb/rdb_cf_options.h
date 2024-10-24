@@ -67,6 +67,8 @@ class Rdb_cf_options {
       std::string_view default_cf_options,
       std::string_view override_cf_options);
 
+  void set_bulk_load_cf_options();
+
   const rocksdb::ColumnFamilyOptions &get_defaults() const {
     return m_default_cf_opts;
   }

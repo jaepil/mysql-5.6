@@ -273,14 +273,16 @@ connection con2;
 SELECT COUNT(*) FROM t1 FORCE INDEX(PRIMARY);
 
 # alter table not allowed when bulk load is not completed
-error ER_LOCK_REFUSED_BY_ENGINE;
+replace_regex /Conflict bulk load [^ ]+/Conflict bulk load <ID>/;
+error ER_DA_BULK_LOAD;
 ALTER TABLE t1 ADD INDEX kj(j), ALGORITHM=INPLACE;
 
 SELECT COUNT(*) FROM t1 FORCE INDEX(PRIMARY);
 
 # set bulk_load 0 on conn2 does not complete bulk load in conn1
 set global rocksdb_bulk_load=0;
-error ER_LOCK_REFUSED_BY_ENGINE;
+replace_regex /Conflict bulk load [^ ]+/Conflict bulk load <ID>/;
+error ER_DA_BULK_LOAD;
 ALTER TABLE t1 ADD INDEX kj(j), ALGORITHM=INPLACE;
 
 connection con1;

@@ -4833,7 +4833,8 @@ class Rdb_transaction {
     }
 
     const auto rtn =
-        ctx->set_curr_table(db_name, bulk_load->get_table_basename());
+        ctx->set_curr_table(db_name, bulk_load->get_table_basename(),
+                            Rdb_bulk_load_type::SST_FILE_WRITER);
     if (rtn) {
       return rtn;
     }
@@ -6666,6 +6667,9 @@ class [[nodiscard]] Rdb_ha_data {
     }
     return m_bulk_load_ctx.get();
   }
+
+  // this updates thread status for the bulk load session
+  void reset_bulk_load_ctx() { m_bulk_load_ctx.reset(); }
 
  private:
   /*
@@ -8515,16 +8519,70 @@ static void move_wals_to_target_dir() {
 
 static bool rocksdb_bulk_load_start(THD *thd, const char *bulk_load_session_id,
                                     Table_ref *tables) {
-  // just stubs for now
-  bool rtn = thd && bulk_load_session_id && tables;
-  return !rtn;
+  auto ha_data = get_ha_data(thd);
+  auto bulk_load_ctx = ha_data->get_or_create_bulk_load_ctx(thd);
+  if (bulk_load_ctx->active()) {
+    std::string err = "Existing bulk load " +
+                      bulk_load_ctx->bulk_load_session_id() +
+                      " in the connection must be committed/rolled back first.";
+    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG, "%s", err.c_str());
+    my_error(ER_DA_BULK_LOAD, MYF(0), err.c_str());
+    return true;
+  }
+  std::unordered_set<std::string> non_default_cf;
+  // used to be preserved in bulk load session to support complete() upon
+  // resumption
+  std::unordered_map<rocksdb::ColumnFamilyHandle *, std::set<Index_id>>
+      cf_indexes;
+  // TODO: there is atomicity issue when the first table succeeds and added to
+  // bulk load session, but following does not
+  for (Table_ref *table = tables; table; table = table->next_local) {
+    TABLE *t = table->table;
+    Rdb_tbl_def *tbl = ddl_manager.find(
+        std::string(t->s->db.str, t->s->db.length) + '.' +
+        std::string(t->s->table_name.str, t->s->table_name.length));
+
+    // use the same cf settings from original index
+    for (uint i = 0; i < tbl->m_key_count; i++) {
+      auto cf_handle = tbl->m_key_descr_arr[i]->get_shared_cf();
+      const std::string cf_name = cf_handle->GetName();
+      cf_indexes[cf_handle.get()].insert(
+          tbl->m_key_descr_arr[i]->get_index_number());
+      if (cf_name != DEFAULT_CF_NAME) {
+        non_default_cf.insert(cf_name);
+      }
+    }
+    // start bulk load session with table, or add table to existing bulk load
+    // session
+    bulk_load_ctx->set_bulk_load_session_id(bulk_load_session_id);
+    auto rtn = bulk_load_ctx->add_table(
+        tbl->base_dbname(), tbl->base_tablename(),
+        Rdb_bulk_load_type::TEMPORARY_RDB, non_default_cf);
+    if (rtn) {
+      ha_data->reset_bulk_load_ctx();
+      return rtn;
+    }
+  }
+  // different threads may double insert the same cf/indexes for the same table,
+  // but correctness and cost wise it should be fine
+  // TODO: need to design for resumption
+  auto rtn = bulk_load_ctx->update_cf_indexes(cf_indexes);
+  if (rtn) ha_data->reset_bulk_load_ctx();
+  return rtn;
 }
 
 static bool rocksdb_bulk_load_rollback(THD *thd,
                                        const char *bulk_load_session_id) {
-  // just stubs for now
-  bool rtn = thd && bulk_load_session_id;
-  return !rtn;
+  auto ha_data = get_ha_data(thd);
+  auto bulk_load_ctx = ha_data->get_or_create_bulk_load_ctx(thd);
+  if (bulk_load_ctx->active()) {
+    my_error(ER_DA_BULK_LOAD, MYF(0),
+             "bulk_load rollback requires calling bulk_load end first, or "
+             "using a new connection to do rollback.");
+    return true;
+  }
+  bulk_load_ctx->set_bulk_load_session_id(bulk_load_session_id);
+  return bulk_load_ctx->bulk_load_rollback();
 }
 
 static bool rocksdb_notify_alter_table(THD *thd, const MDL_key *mdl_key,
@@ -9395,7 +9453,8 @@ static int rocksdb_init_internal(void *const p) {
   rdb_netbuf_store_uint64(reinterpret_cast<uchar *>(max_timestamp_uint64),
                           std::numeric_limits<uint64_t>::max());
 
-  rdb_bulk_load_init();
+  rdb_bulk_load_init(rocksdb_default_cf_options, rocksdb_override_cf_options,
+                     *rocksdb_tbl_options);
 
   DBUG_RETURN(HA_EXIT_SUCCESS);
 }

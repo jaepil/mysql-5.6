@@ -379,13 +379,13 @@ SELECT COUNT(*) FROM t1 FORCE INDEX(PRIMARY);
 COUNT(*)
 0
 ALTER TABLE t1 ADD INDEX kj(j), ALGORITHM=INPLACE;
-ERROR HY000: Lock acquisition refused by storage engine.
+ERROR HY000: Bulk load hits error: Conflict bulk load <ID> on table test.t1
 SELECT COUNT(*) FROM t1 FORCE INDEX(PRIMARY);
 COUNT(*)
 0
 set global rocksdb_bulk_load=0;
 ALTER TABLE t1 ADD INDEX kj(j), ALGORITHM=INPLACE;
-ERROR HY000: Lock acquisition refused by storage engine.
+ERROR HY000: Bulk load hits error: Conflict bulk load <ID> on table test.t1
 set global rocksdb_bulk_load=0;
 ALTER TABLE t1 ADD INDEX kj(j), ALGORITHM=INPLACE;
 SELECT COUNT(*) FROM t1 FORCE INDEX(PRIMARY);

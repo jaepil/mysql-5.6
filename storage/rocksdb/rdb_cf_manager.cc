@@ -499,4 +499,18 @@ bool Rdb_cf_manager::is_tmp_column_family(const uint cf_id) const {
   return false;
 }
 
+void Rdb_cf_manager::drop_cf_from_map(const std::string &cf_name,
+                                      const uint32_t cf_id) {
+  RDB_MUTEX_LOCK_CHECK(m_mutex);
+  const auto name_iter = m_cf_name_map.find(cf_name);
+  if (name_iter != m_cf_name_map.end()) {
+    m_cf_name_map.erase(name_iter);
+  }
+  const auto id_iter = m_cf_id_map.find(cf_id);
+  if (id_iter != m_cf_id_map.end()) {
+    m_cf_id_map.erase(id_iter);
+  }
+  RDB_MUTEX_UNLOCK_CHECK(m_mutex);
+}
+
 }  // namespace myrocks

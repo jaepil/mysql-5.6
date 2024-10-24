@@ -127,17 +127,21 @@ INSERT INTO t1 VALUES(2, 'test 2');
 INSERT INTO t1 VALUES(3, @arg04);
 INSERT INTO t1 VALUES(4,1);
 echo alter/drop table is not allowed in a ongoing bulk load;
-error ER_LOCK_REFUSED_BY_ENGINE;
+replace_regex /Conflict bulk load [^ ]+/Conflict bulk load <ID>/;
+error ER_DA_BULK_LOAD;
 ALTER TABLE t1 ADD COLUMN c int;
-error ER_LOCK_REFUSED_BY_ENGINE;
+replace_regex /Conflict bulk load [^ ]+/Conflict bulk load <ID>/;
+error ER_DA_BULK_LOAD;
 DROP TABLE t1;
 
 connect (con1,localhost,root,,);
 echo on a different connection;
 echo alter/drop table is not allowed during a ongoing bulk load;
-error ER_LOCK_REFUSED_BY_ENGINE;
+replace_regex /Conflict bulk load [^ ]+/Conflict bulk load <ID>/;
+error ER_DA_BULK_LOAD;
 ALTER TABLE t1 ADD COLUMN c int;
-error ER_LOCK_REFUSED_BY_ENGINE;
+replace_regex /Conflict bulk load [^ ]+/Conflict bulk load <ID>/;
+error ER_DA_BULK_LOAD;
 DROP TABLE t1;
 
 connection default;

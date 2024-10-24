@@ -71,6 +71,11 @@ bool Rdb_cf_options::init(
   return true;
 }
 
+void Rdb_cf_options::set_bulk_load_cf_options() {
+  m_default_cf_opts.disable_auto_compactions = true;
+  m_default_cf_opts.memtable_factory.reset(new rocksdb::VectorRepFactory());
+}
+
 void Rdb_cf_options::get(const std::string &cf_name,
                          rocksdb::ColumnFamilyOptions *const opts) {
   assert(opts != nullptr);

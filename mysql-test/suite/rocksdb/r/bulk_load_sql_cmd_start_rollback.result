@@ -1,0 +1,184 @@
+DROP TABLE IF EXISTS t1, t2, t3, t4;
+CREATE TABLE `t1` (   
+`id` bigint unsigned NOT NULL AUTO_INCREMENT,   
+`a` int DEFAULT NULL, 
+`b` int DEFAULT NULL,  
+`c` int DEFAULT NULL,  
+PRIMARY KEY (`id`),   
+UNIQUE KEY `a_key` (`a`) COMMENT 'cfname=cf1', 
+KEY `b_key`(`b`) COMMENT 'rev:cfname=cf1',
+KEY `c_key`(`c`) COMMENT 'cfname=cf2'
+);
+CREATE TABLE `t2` (   
+`id` bigint unsigned NOT NULL AUTO_INCREMENT,   
+`a` int DEFAULT NULL, `b` int DEFAULT NULL,  
+PRIMARY KEY (`id`),   
+UNIQUE KEY `a_key` (`a`), 
+KEY `b_key`(`b`) COMMENT 'cfname=cf3'
+);
+CREATE TABLE `t3` (   
+`id` bigint unsigned NOT NULL AUTO_INCREMENT,   
+`a` int DEFAULT NULL, 
+`b` int DEFAULT NULL,  
+`c` int DEFAULT NULL,  
+PRIMARY KEY (`id`),   
+UNIQUE KEY `a_key` (`a`)
+);
+CREATE TABLE `t4` (   
+`id` bigint unsigned NOT NULL AUTO_INCREMENT,   
+`a` int DEFAULT NULL, 
+PRIMARY KEY (`id`),   
+UNIQUE KEY `a_key` (`a`)
+);
+
+first session
+BULK_LOAD START "job1" TABLES=t1,t2;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ACTIVE	0	2	test.t1,test.t2	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ACTIVE
+
+check if rdb and cf directory is created
+Directory exists
+
+before job1 finishes, not allowed to start another bulk load session in the same session
+BULK_LOAD START "job2" TABLES=t1,t2;
+ERROR HY000: Bulk load hits error: Existing bulk load job1 in the connection must be committed/rolled back first.
+session should still be active, with thread being active too
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ACTIVE	0	2	test.t1,test.t2	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ACTIVE
+
+second connection
+BULK_LOAD START "job1" TABLES=t1,t2;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ACTIVE	0	2	test.t1,test.t2	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ACTIVE,THREAD:ACTIVE
+
+disconnect should abort the connection but not the bulk load session
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ACTIVE	0	2	test.t1,test.t2	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ACTIVE,THREAD:ABORTED
+
+third connection, a different session id with the same table should fail
+BULK_LOAD START "job2" TABLES=t1;
+ERROR HY000: Bulk load hits error: Conflict bulk load job1 on table test.t1
+
+third connection doing index merge bulk load should also fail
+set rocksdb_bulk_load=1;
+insert into t1 values(1,1,1,1);
+ERROR HY000: Bulk load hits error: Conflict bulk load job1 on table test.t1
+set rocksdb_bulk_load=0;
+threads not inserted into session data
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ACTIVE	0	2	test.t1,test.t2	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ACTIVE,THREAD:ABORTED
+this third connection also starts bulk load for job1
+BULK_LOAD START "job1" TABLES=t3;
+3 threads, 2 active(default, conn3) 1 abort(conn2)
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ACTIVE	0	3	test.t1,test.t2,test.t3	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ACTIVE,THREAD:ABORTED,THREAD:ACTIVE
+
+fourth connection, the different session id with different table is fine
+BULK_LOAD START "job2" TABLES=t4;
+2 active sessions
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ACTIVE	0	3	test.t1,test.t2,test.t3	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ACTIVE,THREAD:ABORTED,THREAD:ACTIVE
+job2	TEMPORARY_RDB	ACTIVE	0	1	test.t4	job2_default	THREAD:ACTIVE
+
+fifth connection, cannot alter table while bulk load is going on in another connection
+ALTER TABLE t1 ADD d INT DEFAULT NULL;
+ERROR HY000: Bulk load hits error: Conflict bulk load job1 on table test.t1
+
+fifth connection, start bulk load for on the same table is fine
+BULK_LOAD START "job1" TABLES=t1,t2;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ACTIVE	0	3	test.t1,test.t2,test.t3	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ACTIVE,THREAD:ABORTED,THREAD:ACTIVE,THREAD:ACTIVE
+job2	TEMPORARY_RDB	ACTIVE	0	1	test.t4	job2_default	THREAD:ABORTED
+
+bulk load rollback needs all participating connections to finish
+BULK_LOAD ROLLBACK "job1";
+ERROR HY000: Bulk load hits error: bulk_load rollback requires calling bulk_load end first, or using a new connection to do rollback.
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ACTIVE	0	3	test.t1,test.t2,test.t3	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED
+job2	TEMPORARY_RDB	ACTIVE	0	1	test.t4	job2_default	THREAD:ABORTED
+BULK_LOAD ROLLBACK "job1";
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ABORTED	1	3	test.t1,test.t2,test.t3	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED
+job2	TEMPORARY_RDB	ACTIVE	0	1	test.t4	job2_default	THREAD:ABORTED
+
+using the same job id for non-active bulk load session is not allowed
+BULK_LOAD START "job1" TABLES=t4;
+ERROR HY000: Bulk load hits error: Conflict bulk load job1 on table test.t4
+
+after this connection(conn6) is done with rollback, can start another job using the same connection
+BULK_LOAD START "job3" TABLES=t1,t2;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ABORTED	1	3	test.t1,test.t2,test.t3	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED
+job2	TEMPORARY_RDB	ACTIVE	0	1	test.t4	job2_default	THREAD:ABORTED
+job3	TEMPORARY_RDB	ACTIVE	0	2	test.t1,test.t2	job3_cf1,job3_cf2,job3_cf3,job3_default,job3_rev:cfname=cf1	THREAD:ACTIVE
+
+rollback other jobs
+BULK_LOAD ROLLBACK "job2";
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ABORTED	1	3	test.t1,test.t2,test.t3	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED
+job2	TEMPORARY_RDB	ABORTED	1	1	test.t4	job2_default	THREAD:ABORTED
+job3	TEMPORARY_RDB	ACTIVE	0	2	test.t1,test.t2	job3_cf1,job3_cf2,job3_cf3,job3_default,job3_rev:cfname=cf1	THREAD:ACTIVE
+
+alter table is allowed on conn7 after job1 is rollback for t3
+ALTER TABLE t3 ADD d INT DEFAULT NULL, ADD KEY `key_d`(d);
+
+alter table is not allowed on conn6 that started a bulk load
+ALTER TABLE t4 ADD d INT DEFAULT NULL, ADD KEY `key_d`(d);
+ERROR HY000: Bulk load hits error: Conflict bulk load job3 is running in the current transaction
+
+rollback fails, status is failure
+SET DEBUG= '+d, bulk_load_complete_error';
+call mtr.add_suppression("RocksDB: Fail to drop cf job3_cf1, Status Code: 7, Status: Result incomplete:");
+BULK_LOAD ROLLBACK "job3";
+ERROR HY000: Bulk load hits error: Fail to drop bulk load
+SET DEBUG= '-d, bulk_load_complete_error';
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ABORTED	1	3	test.t1,test.t2,test.t3	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED
+job2	TEMPORARY_RDB	ABORTED	1	1	test.t4	job2_default	THREAD:ABORTED
+job3	TEMPORARY_RDB	FAILED	1	2	test.t1,test.t2	job3_cf1,job3_cf2,job3_cf3,job3_default,job3_rev:cfname=cf1	THREAD:ABORTED
+
+no alter conflict on table t1 and t2 now
+ALTER TABLE t1 ADD d INT DEFAULT NULL, ADD KEY `key_d`(d);
+ALTER TABLE t2 ADD d INT DEFAULT NULL, ADD KEY `key_d`(d);
+
+rollback a non-existing job
+BULK_LOAD ROLLBACK "job4";
+ERROR HY000: Bulk load hits error: Bulk load session is not active, nothing to finish
+rollback a job already rollback
+BULK_LOAD ROLLBACK "job3";
+ERROR HY000: Bulk load hits error: Bulk load session is not active, nothing to finish
+
+current behavior: bulk_load start multiple tables, while the first table succeds and the second fails, the session is partially started
+set rocksdb_bulk_load=1;
+insert into t1(id,a,b,c) values(1,1,1,1);
+BULK_LOAD START 'job4' TABLES=t2,t1;
+ERROR HY000: Bulk load hits error: Conflict bulk load <ID> is running on table test.t1
+BULK_LOAD ROLLBACK 'job4';
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+job1	TEMPORARY_RDB	ABORTED	1	3	test.t1,test.t2,test.t3	job1_cf1,job1_cf2,job1_cf3,job1_default,job1_rev:cfname=cf1	THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED,THREAD:ABORTED
+job2	TEMPORARY_RDB	ABORTED	1	1	test.t4	job2_default	THREAD:ABORTED
+job3	TEMPORARY_RDB	FAILED	1	2	test.t1,test.t2	job3_cf1,job3_cf2,job3_cf3,job3_default,job3_rev:cfname=cf1	THREAD:ABORTED
+job4	TEMPORARY_RDB	ABORTED	1	1	test.t2		THREAD:ABORTED
+# restart
+
+after server restart, bulk load directory is gone and we can start a new bulk load again
+Directory does not exist
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+SESSION_ID	TYPE	STATUS	RETURN_CODE	TABLE_COUNT	TABLES	CF_NAMES	REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:')
+BULK_LOAD START "job_after_restart" TABLES=t1;
+BULK_LOAD ROLLBACK "job_after_restart";
+DROP TABLE t1, t2, t3, t4;

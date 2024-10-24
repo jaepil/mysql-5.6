@@ -2507,11 +2507,15 @@ enum {
   RETURN_CODE,
   TABLE_COUNT,
   TABLES,
+  CF_NAMES,
+  THREADS,
   SST_FILES,
   CREATED_TIME,
   COMPLETED_TIME
 };
 constexpr uint TABLES_MAX_LENGTH = 64 * 1024;
+constexpr uint CF_NAMES_MAX_LENGTH = 64 * 1024;
+constexpr uint THREADS_MAX_LENGTH = 64 * 1024;
 }  // namespace RDB_BULK_LOAD_FIELD
 
 static ST_FIELD_INFO rdb_i_s_bulk_load_history_fields_info[] = {
@@ -2522,6 +2526,11 @@ static ST_FIELD_INFO rdb_i_s_bulk_load_history_fields_info[] = {
     ROCKSDB_FIELD_INFO("TABLE_COUNT", sizeof(uint64), MYSQL_TYPE_LONGLONG, 0),
     // leave some room for tailing "..." when names get too long
     ROCKSDB_FIELD_INFO("TABLES", RDB_BULK_LOAD_FIELD::TABLES_MAX_LENGTH + 10,
+                       MYSQL_TYPE_STRING, 0),
+    ROCKSDB_FIELD_INFO("CF_NAMES",
+                       RDB_BULK_LOAD_FIELD::CF_NAMES_MAX_LENGTH + 10,
+                       MYSQL_TYPE_STRING, 0),
+    ROCKSDB_FIELD_INFO("THREADS", RDB_BULK_LOAD_FIELD::THREADS_MAX_LENGTH + 10,
                        MYSQL_TYPE_STRING, 0),
     ROCKSDB_FIELD_INFO("SST_FILES", sizeof(uint64), MYSQL_TYPE_LONGLONG, 0),
     ROCKSDB_FIELD_INFO("CREATED_TIME", 3, MYSQL_TYPE_TIMESTAMP, 0),
@@ -2568,6 +2577,40 @@ static int rdb_i_s_bulk_load_history_fill_table(
     }
     field[RDB_BULK_LOAD_FIELD::TABLES]->store(
         tables_str.c_str(), tables_str.size(), system_charset_info);
+    std::string cf_names_str;
+    for (const auto &cf_name : record.cf_names()) {
+      if (cf_names_str.length() + cf_name.length() >
+          RDB_BULK_LOAD_FIELD::CF_NAMES_MAX_LENGTH) {
+        cf_names_str.append("...");
+        break;
+      } else {
+        if (cf_names_str.length() > 0) {
+          cf_names_str.append(",");
+        }
+        cf_names_str.append(cf_name);
+      }
+    }
+    field[RDB_BULK_LOAD_FIELD::CF_NAMES]->store(
+        cf_names_str.c_str(), cf_names_str.size(), system_charset_info);
+    std::string threads_status_str;
+    for (const auto &worker : record.workers()) {
+      std::string status =
+          std::to_string(worker.first) + ":" +
+          std::string(rdb_bulk_load_status_to_string(worker.second.status()));
+      if (threads_status_str.length() + status.length() >
+          RDB_BULK_LOAD_FIELD::THREADS_MAX_LENGTH) {
+        threads_status_str.append("...");
+        break;
+      } else {
+        if (threads_status_str.length() > 0) {
+          threads_status_str.append(",");
+        }
+        threads_status_str.append(status);
+      }
+    }
+    field[RDB_BULK_LOAD_FIELD::THREADS]->store(threads_status_str.c_str(),
+                                               threads_status_str.size(),
+                                               system_charset_info);
     field[RDB_BULK_LOAD_FIELD::SST_FILES]->store(record.num_sst_files(), true);
     my_timeval created_time;
     my_micro_time_to_timeval(record.created_micro(), &created_time);

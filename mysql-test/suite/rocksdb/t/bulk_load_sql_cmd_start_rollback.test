@@ -1,0 +1,202 @@
+# TODO: confirm cf stats is correct for the newly created rdb
+
+--source include/have_debug.inc
+
+disable_warnings;
+DROP TABLE IF EXISTS t1, t2, t3, t4;
+enable_warnings;
+enable_query_log;
+
+CREATE TABLE `t1` (   
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,   
+    `a` int DEFAULT NULL, 
+    `b` int DEFAULT NULL,  
+    `c` int DEFAULT NULL,  
+    PRIMARY KEY (`id`),   
+    UNIQUE KEY `a_key` (`a`) COMMENT 'cfname=cf1', 
+    KEY `b_key`(`b`) COMMENT 'rev:cfname=cf1',
+    KEY `c_key`(`c`) COMMENT 'cfname=cf2'
+);
+
+CREATE TABLE `t2` (   
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,   
+    `a` int DEFAULT NULL, `b` int DEFAULT NULL,  
+    PRIMARY KEY (`id`),   
+    UNIQUE KEY `a_key` (`a`), 
+    KEY `b_key`(`b`) COMMENT 'cfname=cf3'
+);
+
+CREATE TABLE `t3` (   
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,   
+    `a` int DEFAULT NULL, 
+    `b` int DEFAULT NULL,  
+    `c` int DEFAULT NULL,  
+    PRIMARY KEY (`id`),   
+    UNIQUE KEY `a_key` (`a`)
+);
+
+CREATE TABLE `t4` (   
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,   
+    `a` int DEFAULT NULL, 
+    PRIMARY KEY (`id`),   
+    UNIQUE KEY `a_key` (`a`)
+);
+
+echo;
+echo first session;
+connection default;
+BULK_LOAD START "job1" TABLES=t1,t2;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+
+echo;
+let $dir=`SELECT CONCAT(@@tmpdir, '/bulk_load')`;
+echo check if rdb and cf directory is created;
+exec test -d $dir && echo "Directory exists" || echo "Directory does not exist";
+
+echo;
+echo before job1 finishes, not allowed to start another bulk load session in the same session;
+error ER_DA_BULK_LOAD;
+BULK_LOAD START "job2" TABLES=t1,t2;
+echo session should still be active, with thread being active too;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+
+echo;
+echo second connection;
+connect (conn2, localhost, root);
+BULK_LOAD START "job1" TABLES=t1,t2;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+
+echo;
+echo disconnect should abort the connection but not the bulk load session;
+disconnect conn2;
+connection default;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+
+echo;
+echo third connection, a different session id with the same table should fail;
+connect (conn3, localhost, root);
+error ER_DA_BULK_LOAD;
+BULK_LOAD START "job2" TABLES=t1;
+
+echo;
+echo third connection doing index merge bulk load should also fail;
+set rocksdb_bulk_load=1;
+error ER_DA_BULK_LOAD;
+insert into t1 values(1,1,1,1);
+set rocksdb_bulk_load=0;
+echo threads not inserted into session data;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+echo this third connection also starts bulk load for job1;
+BULK_LOAD START "job1" TABLES=t3;
+echo 3 threads, 2 active(default, conn3) 1 abort(conn2);
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+
+echo;
+echo fourth connection, the different session id with different table is fine;
+connect (conn4, localhost, root);
+BULK_LOAD START "job2" TABLES=t4;
+echo 2 active sessions;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+disconnect conn4;
+
+echo;
+echo fifth connection, cannot alter table while bulk load is going on in another connection;
+connect (conn5, localhost, root);
+error ER_DA_BULK_LOAD;
+ALTER TABLE t1 ADD d INT DEFAULT NULL;
+
+echo;
+echo fifth connection, start bulk load for on the same table is fine;
+BULK_LOAD START "job1" TABLES=t1,t2;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+
+echo;
+echo bulk load rollback needs all participating connections to finish;
+replace_regex /Thread [0-9]+/Thread <THREAD_ID>/;
+error ER_DA_BULK_LOAD;
+BULK_LOAD ROLLBACK "job1";
+disconnect default;
+disconnect conn3;
+disconnect conn5;
+connect (conn6, localhost, root);
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+BULK_LOAD ROLLBACK "job1";
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+
+echo;
+echo using the same job id for non-active bulk load session is not allowed;
+error ER_DA_BULK_LOAD;
+BULK_LOAD START "job1" TABLES=t4;
+
+echo;
+echo after this connection(conn6) is done with rollback, can start another job using the same connection;
+BULK_LOAD START "job3" TABLES=t1,t2;
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+
+echo;
+echo rollback other jobs;
+connect (conn7, localhost, root);
+BULK_LOAD ROLLBACK "job2";
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+
+echo;
+echo alter table is allowed on conn7 after job1 is rollback for t3;
+ALTER TABLE t3 ADD d INT DEFAULT NULL, ADD KEY `key_d`(d);
+
+echo;
+echo alter table is not allowed on conn6 that started a bulk load;
+connection conn6;
+error ER_DA_BULK_LOAD;
+ALTER TABLE t4 ADD d INT DEFAULT NULL, ADD KEY `key_d`(d);
+disconnect conn6;
+
+echo;
+echo rollback fails, status is failure;
+connection conn7;
+SET DEBUG= '+d, bulk_load_complete_error';
+call mtr.add_suppression("RocksDB: Fail to drop cf job3_cf1, Status Code: 7, Status: Result incomplete:");
+error ER_DA_BULK_LOAD;
+BULK_LOAD ROLLBACK "job3";
+SET DEBUG= '-d, bulk_load_complete_error';
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+
+echo;
+echo no alter conflict on table t1 and t2 now;
+ALTER TABLE t1 ADD d INT DEFAULT NULL, ADD KEY `key_d`(d);
+ALTER TABLE t2 ADD d INT DEFAULT NULL, ADD KEY `key_d`(d);
+
+echo;
+echo rollback a non-existing job;
+error ER_DA_BULK_LOAD;
+BULK_LOAD ROLLBACK "job4";
+echo rollback a job already rollback;
+error ER_DA_BULK_LOAD;
+BULK_LOAD ROLLBACK "job3";
+
+echo;
+echo current behavior: bulk_load start multiple tables, while the first table succeds and the second fails, the session is partially started;
+set rocksdb_bulk_load=1;
+insert into t1(id,a,b,c) values(1,1,1,1);
+connect (conn8, localhost, root);
+replace_regex /Conflict bulk load [^ ]+/Conflict bulk load <ID>/;
+error ER_DA_BULK_LOAD;
+BULK_LOAD START 'job4' TABLES=t2,t1;
+BULK_LOAD ROLLBACK 'job4';
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+
+# Restart mysqld with default options
+--let restart_parameters=
+--source include/restart_mysqld.inc
+
+echo;
+echo after server restart, bulk load directory is gone and we can start a new bulk load again;
+exec test -d $dir && echo "Directory exists" || echo "Directory does not exist";
+connect (conn9, localhost, root);
+SELECT SESSION_ID, TYPE, STATUS, RETURN_CODE, TABLE_COUNT, TABLES, CF_NAMES, REGEXP_REPLACE(THREADS, '[0-9]+:', 'THREAD:') FROM INFORMATION_SCHEMA.ROCKSDB_BULK_LOAD_HISTORY WHERE TYPE = "TEMPORARY_RDB";
+BULK_LOAD START "job_after_restart" TABLES=t1;
+disconnect conn9;
+connect (conn10, localhost, root);
+BULK_LOAD ROLLBACK "job_after_restart";
+
+# Cleanup
+DROP TABLE t1, t2, t3, t4;

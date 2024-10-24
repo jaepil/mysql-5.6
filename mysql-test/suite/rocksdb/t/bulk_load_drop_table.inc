@@ -8,7 +8,8 @@ SET rocksdb_bulk_load=1;
 INSERT INTO t1 VALUES (1);
 
 --connect (con1,localhost,root,,)
-error ER_LOCK_REFUSED_BY_ENGINE;
+replace_regex /Conflict bulk load [^ ]+/Conflict bulk load <ID>/;
+error ER_DA_BULK_LOAD;
 DROP TABLE t1;
 
 --connection default

@@ -82,15 +82,15 @@ INSERT INTO t1 VALUES(3, @arg04);
 INSERT INTO t1 VALUES(4,1);
 alter/drop table is not allowed in a ongoing bulk load
 ALTER TABLE t1 ADD COLUMN c int;
-ERROR HY000: Lock acquisition refused by storage engine.
+ERROR HY000: Bulk load hits error: Conflict bulk load <ID> is running in the current transaction
 DROP TABLE t1;
-ERROR HY000: Lock acquisition refused by storage engine.
+ERROR HY000: Bulk load hits error: Conflict bulk load <ID> is running in the current transaction
 on a different connection
 alter/drop table is not allowed during a ongoing bulk load
 ALTER TABLE t1 ADD COLUMN c int;
-ERROR HY000: Lock acquisition refused by storage engine.
+ERROR HY000: Bulk load hits error: Conflict bulk load <ID> on table test.t1
 DROP TABLE t1;
-ERROR HY000: Lock acquisition refused by storage engine.
+ERROR HY000: Bulk load hits error: Conflict bulk load <ID> on table test.t1
 INSERT INTO t1 VALUES(5,1);
 SET rocksdb_bulk_load=0;
 select * from t1;
