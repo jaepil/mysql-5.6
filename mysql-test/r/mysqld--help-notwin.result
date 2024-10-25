@@ -2579,6 +2579,9 @@ The following options may be given as the first argument:
  Simulated cache size for RocksDB
  --rocksdb-skip-bloom-filter-on-read 
  Skip using bloom filter for reads
+ --rocksdb-skip-bulk-load-notify-ddl 
+ skips checking ddl operations conflict with active bulk
+ loading
  --rocksdb-skip-fill-cache 
  Skip filling block cache on read requests
  --rocksdb-skip-locks-if-skip-unique-check 
@@ -4087,6 +4090,7 @@ rocksdb-select-bypass-rejected-query-history-size 0
 rocksdb-signal-drop-index-thread FALSE
 rocksdb-sim-cache-size 0
 rocksdb-skip-bloom-filter-on-read FALSE
+rocksdb-skip-bulk-load-notify-ddl FALSE
 rocksdb-skip-fill-cache FALSE
 rocksdb-skip-locks-if-skip-unique-check FALSE
 rocksdb-skip-snapshot-validation FALSE
