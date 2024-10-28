@@ -1,0 +1,473 @@
+
+--echo 
+--echo Record value of fb_vector_index_cond_pushdown
+--echo
+
+SELECT @@SESSION.fb_vector_index_cond_pushdown;
+SELECT @@SESSION.fb_vector_use_iterator_bounds;
+
+--echo
+--echo Create table with PK and non-key parts, and 3 vector columns
+--echo 
+
+CREATE TABLE t1 (      
+  pk_char_keypart_1 CHAR (16) NOT NULL,   
+  pk_bigint_keypart_2 BIGINT NOT NULL,   
+  pk_varchar_keypart_3 VARCHAR (10),   
+  pk_int_keypart_4 INT,   
+  vector1 JSON NOT NULL FB_VECTOR_DIMENSION 3,   
+  non_key_char CHAR (16),   
+  vector2 JSON NOT NULL FB_VECTOR_DIMENSION 3,   
+  non_key_int INT NOT NULL,   
+  vector3 JSON NOT NULL FB_VECTOR_DIMENSION 3,   
+  non_key_bigint BIGINT,   
+  PRIMARY KEY (pk_char_keypart_1, pk_bigint_keypart_2, pk_varchar_keypart_3, pk_int_keypart_4) 
+);
+
+insert into t1 (
+  WITH RECURSIVE a(i) AS (SELECT 1 union all select i+1 from a where i < 10)  
+  SELECT 'blue', i/2, CONCAT('blue', CAST((i/4 + 0.25) as UNSIGNED)), i, 
+    json_array(i, i+1.1, i+1.2), 'TUE', 
+    json_array(i, i-1.1, i-1.2), i, 
+    json_array(i, i+1.1, i-1.1), i*2 
+  FROM a
+);
+
+insert into t1 (
+  WITH RECURSIVE a(i) AS (SELECT 1 union all select i+1 from a where i < 10)  
+  SELECT 'green', (i+10)/2, CONCAT('green', CAST(((i+10)/4 + 0.25) as UNSIGNED)), i+10, 
+    json_array(i+10, i+10+1.1, i+10+1.2), 'WED', 
+    json_array(i+10, i+10-1.1, i+10-1.2), i+10, 
+    json_array(i+10, i+10+1.1, i+10-1.1), (i+10)*2 
+  FROM a
+);
+
+insert into t1 (
+  WITH RECURSIVE a(i) AS (SELECT 1 union all select i+1 from a where i < 10)  
+  SELECT 'red', (i+20)/2, CONCAT('red', CAST(((i+20)/4 + 0.25) as UNSIGNED)), i+20, 
+    json_array(i+20, i+20+1.1, i+20+1.2), 'THU', 
+    json_array(i+20, i+20-1.1, i+20-1.2), i+20, 
+    json_array(i+20, i+20+1.1, i+20-1.1), (i+20)*2 
+  FROM a
+);
+
+--echo
+--echo 1. Test vector search without vector index available
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+
+--replace_regex /\(cost=[0-9. ]*// /rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+
+--echo 
+--echo 2. Add a vector index
+--echo
+
+create index vector_key_1 on t1 (vector1) FB_VECTOR_INDEX_TYPE 'flat';
+
+analyze table t1;
+
+--echo
+--echo 2.1 Test query with PK range possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+
+--echo
+--echo 2.2 Test query with PK cond possible, range not possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+
+--echo
+--echo 2.3 Test query with PK range possible, and PK cond possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+
+--echo
+--echo 2.4 Test non PK condition in addition to PK range + cond
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+
+--echo
+--echo 2.5 Test vector search without vector index available
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+
+--echo 
+--echo 3. Add a second vector index
+--echo
+
+create index vector_key_2 on t1 (vector2) FB_VECTOR_INDEX_TYPE 'flat';
+
+analyze table t1;
+
+--echo
+--echo 3.1 Test query with PK range possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+
+--echo
+--echo 3.2 Test query with PK cond possible, range not possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+
+--echo
+--echo 3.3 Test query with PK range possible, and PK cond possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+
+--echo
+--echo 3.4 Test non PK condition in addition to PK range + cond
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+
+--echo
+--echo 3.5 Test vector search without vector index available
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+
+
+--echo 
+--echo 4. Add a third vector index
+--echo
+
+create index vector_key_3 on t1 (vector3) FB_VECTOR_INDEX_TYPE 'flat';
+
+analyze table t1;
+
+--echo
+--echo 4.1 Test query with PK range possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+
+--echo
+--echo 4.2 Test query with PK cond possible, range not possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+
+--echo
+--echo 4.3 Test query with PK range possible, and PK cond possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+
+--echo
+--echo 4.4 Test non PK condition in addition to PK range + cond
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+
+
+--echo 
+--echo 5. Check correctness of results 
+--echo
+
+--let $status_tab = status_tmp
+--let $status_like = 'rocksdb_vectors_%'
+
+--source include/show_status_init.inc
+
+--echo 5.1 Test query with PK range possible
+--echo
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+
+--echo
+--echo 5.2 Test query with PK cond possible, range not possible
+--echo
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+
+--echo
+--echo 5.3 Test query with PK range possible, and PK cond possible
+--echo
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+
+--echo
+--echo 5.4 Test non PK condition in addition to PK range + cond
+--echo
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+--replace_numeric_round 2
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+--source include/show_status.inc
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+  MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+
+
+
+--echo 
+--echo 6. Delete the first and second vector indexes
+--echo
+
+drop index vector_key_1 on t1;
+drop index vector_key_2 on t1;
+
+--echo
+--echo 6.1 Test query with PK range possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+
+--echo
+--echo 6.2 Test query with PK cond possible, range not possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+
+--echo
+--echo 6.3 Test query with PK range possible, and PK cond possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+
+--echo
+--echo 6.4 Test non PK condition in addition to PK range + cond
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+
+--echo 
+--echo 7. Create the second vector index back
+--echo
+
+create index vector_key_2 on t1 (vector2) FB_VECTOR_INDEX_TYPE 'flat';
+
+analyze table t1;
+
+--echo
+--echo 7.1 Test query with PK range possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+
+--echo
+--echo 7.2 Test query with PK cond possible, range not possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+
+--echo
+--echo 7.3 Test query with PK range possible, and PK cond possible
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+
+--echo
+--echo 7.4 Test non PK condition in addition to PK range + cond
+--echo
+
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+--replace_regex /\(cost=[0-9. ]*rows=[0-9.]*\)//
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+
+drop table t1;
+

@@ -1,0 +1,806 @@
+
+Record value of fb_vector_index_cond_pushdown
+
+SELECT @@SESSION.fb_vector_index_cond_pushdown;
+@@SESSION.fb_vector_index_cond_pushdown
+1
+SELECT @@SESSION.fb_vector_use_iterator_bounds;
+@@SESSION.fb_vector_use_iterator_bounds
+1
+
+Create table with PK and non-key parts, and 3 vector columns
+
+CREATE TABLE t1 (      
+pk_char_keypart_1 CHAR (16) NOT NULL,   
+pk_bigint_keypart_2 BIGINT NOT NULL,   
+pk_varchar_keypart_3 VARCHAR (10),   
+pk_int_keypart_4 INT,   
+vector1 JSON NOT NULL FB_VECTOR_DIMENSION 3,   
+non_key_char CHAR (16),   
+vector2 JSON NOT NULL FB_VECTOR_DIMENSION 3,   
+non_key_int INT NOT NULL,   
+vector3 JSON NOT NULL FB_VECTOR_DIMENSION 3,   
+non_key_bigint BIGINT,   
+PRIMARY KEY (pk_char_keypart_1, pk_bigint_keypart_2, pk_varchar_keypart_3, pk_int_keypart_4) 
+);
+insert into t1 (
+WITH RECURSIVE a(i) AS (SELECT 1 union all select i+1 from a where i < 10)  
+SELECT 'blue', i/2, CONCAT('blue', CAST((i/4 + 0.25) as UNSIGNED)), i, 
+json_array(i, i+1.1, i+1.2), 'TUE', 
+json_array(i, i-1.1, i-1.2), i, 
+json_array(i, i+1.1, i-1.1), i*2 
+FROM a
+);
+insert into t1 (
+WITH RECURSIVE a(i) AS (SELECT 1 union all select i+1 from a where i < 10)  
+SELECT 'green', (i+10)/2, CONCAT('green', CAST(((i+10)/4 + 0.25) as UNSIGNED)), i+10, 
+json_array(i+10, i+10+1.1, i+10+1.2), 'WED', 
+json_array(i+10, i+10-1.1, i+10-1.2), i+10, 
+json_array(i+10, i+10+1.1, i+10-1.1), (i+10)*2 
+FROM a
+);
+insert into t1 (
+WITH RECURSIVE a(i) AS (SELECT 1 union all select i+1 from a where i < 10)  
+SELECT 'red', (i+20)/2, CONCAT('red', CAST(((i+20)/4 + 0.25) as UNSIGNED)), i+20, 
+json_array(i+20, i+20+1.1, i+20+1.2), 'THU', 
+json_array(i+20, i+20-1.1, i+20-1.2), i+20, 
+json_array(i+20, i+20+1.1, i+20-1.1), (i+20)*2 
+FROM a
+);
+
+1. Test vector search without vector index available
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.pk_char_keypart_1 = 'green')  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.pk_char_keypart_1 = 'green')  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+
+2. Add a vector index
+
+create index vector_key_1 on t1 (vector1) FB_VECTOR_INDEX_TYPE 'flat';
+analyze table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+
+2.1 Test query with PK range possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_1 over (pk_char_keypart_1 = 'green'), with index condition: (t1.pk_char_keypart_1 = 'green')  
+
+
+2.2 Test query with PK cond possible, range not possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_1, with index condition: (t1.pk_varchar_keypart_3 like 'green%')  
+
+
+2.3 Test query with PK range possible, and PK cond possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_1 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+
+2.4 Test non PK condition in addition to PK range + cond
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.non_key_char like 't%')  
+            -> Vector index scan on t1 using vector_key_1 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+
+2.5 Test vector search without vector index available
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.pk_char_keypart_1 = 'green')  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.pk_char_keypart_1 = 'green')  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+
+3. Add a second vector index
+
+create index vector_key_2 on t1 (vector2) FB_VECTOR_INDEX_TYPE 'flat';
+analyze table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+
+3.1 Test query with PK range possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_1 over (pk_char_keypart_1 = 'green'), with index condition: (t1.pk_char_keypart_1 = 'green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_2 over (pk_char_keypart_1 = 'green'), with index condition: (t1.pk_char_keypart_1 = 'green')  
+
+
+3.2 Test query with PK cond possible, range not possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_1, with index condition: (t1.pk_varchar_keypart_3 like 'green%')  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_2, with index condition: (t1.pk_varchar_keypart_3 like 'green%')  
+
+
+3.3 Test query with PK range possible, and PK cond possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_1 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_2 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+
+3.4 Test non PK condition in addition to PK range + cond
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.non_key_char like 't%')  
+            -> Vector index scan on t1 using vector_key_1 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.non_key_char like 't%')  
+            -> Vector index scan on t1 using vector_key_2 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+
+3.5 Test vector search without vector index available
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.pk_char_keypart_1 = 'green')  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+
+4. Add a third vector index
+
+create index vector_key_3 on t1 (vector3) FB_VECTOR_INDEX_TYPE 'flat';
+analyze table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+
+4.1 Test query with PK range possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_1 over (pk_char_keypart_1 = 'green'), with index condition: (t1.pk_char_keypart_1 = 'green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_2 over (pk_char_keypart_1 = 'green'), with index condition: (t1.pk_char_keypart_1 = 'green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_3 over (pk_char_keypart_1 = 'green'), with index condition: (t1.pk_char_keypart_1 = 'green')  
+
+
+4.2 Test query with PK cond possible, range not possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_1, with index condition: (t1.pk_varchar_keypart_3 like 'green%')  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_2, with index condition: (t1.pk_varchar_keypart_3 like 'green%')  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_3, with index condition: (t1.pk_varchar_keypart_3 like 'green%')  
+
+
+4.3 Test query with PK range possible, and PK cond possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_1 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_2 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_3 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+
+4.4 Test non PK condition in addition to PK range + cond
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.non_key_char like 't%')  
+            -> Vector index scan on t1 using vector_key_1 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.non_key_char like 't%')  
+            -> Vector index scan on t1 using vector_key_2 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.non_key_char like 't%')  
+            -> Vector index scan on t1 using vector_key_3 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+
+5. Check correctness of results 
+
+5.1 Test query with PK range possible
+
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+green	6	green3	11	[11, 12.1, 12.2]	WED	[11, 9.9, 9.8]	11	[11, 12.1, 9.9]	22	240.3
+green	6	green3	12	[12, 13.1, 13.2]	WED	[12, 10.9, 10.8]	12	[12, 13.1, 10.9]	24	296.9
+green	7	green4	13	[13, 14.1, 14.2]	WED	[13, 11.9, 11.8]	13	[13, 14.1, 11.9]	26	359.5
+green	7	green4	14	[14, 15.1, 15.2]	WED	[14, 12.9, 12.8]	14	[14, 15.1, 12.9]	28	428.1
+green	8	green4	15	[15, 16.1, 16.2]	WED	[15, 13.9, 13.8]	15	[15, 16.1, 13.9]	30	502.7
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	0
+rocksdb_vectors_rcvd_from_faiss	10
+rocksdb_vectors_read	10
+rocksdb_vectors_rows_read	5
+rocksdb_vectors_sent_to_faiss	10
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	10	10
+test	t1	vector_key_2	flat	0	0
+test	t1	vector_key_3	flat	0	0
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+green	6	green3	11	[11, 12.1, 12.2]	WED	[11, 9.9, 9.8]	11	[11, 12.1, 9.9]	22	166.5
+green	6	green3	12	[12, 13.1, 13.2]	WED	[12, 10.9, 10.8]	12	[12, 13.1, 10.9]	24	213.9
+green	7	green4	13	[13, 14.1, 14.2]	WED	[13, 11.9, 11.8]	13	[13, 14.1, 11.9]	26	267.3
+green	7	green4	14	[14, 15.1, 15.2]	WED	[14, 12.9, 12.8]	14	[14, 15.1, 12.9]	28	326.7
+green	8	green4	15	[15, 16.1, 16.2]	WED	[15, 13.9, 13.8]	15	[15, 16.1, 13.9]	30	392.1
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	0
+rocksdb_vectors_rcvd_from_faiss	10
+rocksdb_vectors_read	10
+rocksdb_vectors_rows_read	5
+rocksdb_vectors_sent_to_faiss	10
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	10	10
+test	t1	vector_key_2	flat	10	10
+test	t1	vector_key_3	flat	0	0
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+green	6	green3	11	[11, 12.1, 12.2]	WED	[11, 9.9, 9.8]	11	[11, 12.1, 9.9]	22	200.97
+green	6	green3	12	[12, 13.1, 13.2]	WED	[12, 10.9, 10.8]	12	[12, 13.1, 10.9]	24	252.97
+green	7	green4	13	[13, 14.1, 14.2]	WED	[13, 11.9, 11.8]	13	[13, 14.1, 11.9]	26	310.97
+green	7	green4	14	[14, 15.1, 15.2]	WED	[14, 12.9, 12.8]	14	[14, 15.1, 12.9]	28	374.97
+green	8	green4	15	[15, 16.1, 16.2]	WED	[15, 13.9, 13.8]	15	[15, 16.1, 13.9]	30	444.97
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	0
+rocksdb_vectors_rcvd_from_faiss	10
+rocksdb_vectors_read	10
+rocksdb_vectors_rows_read	5
+rocksdb_vectors_sent_to_faiss	10
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	10	10
+test	t1	vector_key_2	flat	10	10
+test	t1	vector_key_3	flat	10	10
+
+5.2 Test query with PK cond possible, range not possible
+
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+green	6	green3	11	[11, 12.1, 12.2]	WED	[11, 9.9, 9.8]	11	[11, 12.1, 9.9]	22	240.3
+green	6	green3	12	[12, 13.1, 13.2]	WED	[12, 10.9, 10.8]	12	[12, 13.1, 10.9]	24	296.9
+green	7	green4	13	[13, 14.1, 14.2]	WED	[13, 11.9, 11.8]	13	[13, 14.1, 11.9]	26	359.5
+green	7	green4	14	[14, 15.1, 15.2]	WED	[14, 12.9, 12.8]	14	[14, 15.1, 12.9]	28	428.1
+green	8	green4	15	[15, 16.1, 16.2]	WED	[15, 13.9, 13.8]	15	[15, 16.1, 13.9]	30	502.7
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	30
+rocksdb_vectors_rcvd_from_faiss	10
+rocksdb_vectors_read	40
+rocksdb_vectors_rows_read	5
+rocksdb_vectors_sent_to_faiss	10
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	10	10
+test	t1	vector_key_2	flat	10	10
+test	t1	vector_key_3	flat	10	10
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+green	6	green3	11	[11, 12.1, 12.2]	WED	[11, 9.9, 9.8]	11	[11, 12.1, 9.9]	22	166.5
+green	6	green3	12	[12, 13.1, 13.2]	WED	[12, 10.9, 10.8]	12	[12, 13.1, 10.9]	24	213.9
+green	7	green4	13	[13, 14.1, 14.2]	WED	[13, 11.9, 11.8]	13	[13, 14.1, 11.9]	26	267.3
+green	7	green4	14	[14, 15.1, 15.2]	WED	[14, 12.9, 12.8]	14	[14, 15.1, 12.9]	28	326.7
+green	8	green4	15	[15, 16.1, 16.2]	WED	[15, 13.9, 13.8]	15	[15, 16.1, 13.9]	30	392.1
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	30
+rocksdb_vectors_rcvd_from_faiss	10
+rocksdb_vectors_read	40
+rocksdb_vectors_rows_read	5
+rocksdb_vectors_sent_to_faiss	10
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	10	10
+test	t1	vector_key_2	flat	10	10
+test	t1	vector_key_3	flat	10	10
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+green	6	green3	11	[11, 12.1, 12.2]	WED	[11, 9.9, 9.8]	11	[11, 12.1, 9.9]	22	200.97
+green	6	green3	12	[12, 13.1, 13.2]	WED	[12, 10.9, 10.8]	12	[12, 13.1, 10.9]	24	252.97
+green	7	green4	13	[13, 14.1, 14.2]	WED	[13, 11.9, 11.8]	13	[13, 14.1, 11.9]	26	310.97
+green	7	green4	14	[14, 15.1, 15.2]	WED	[14, 12.9, 12.8]	14	[14, 15.1, 12.9]	28	374.97
+green	8	green4	15	[15, 16.1, 16.2]	WED	[15, 13.9, 13.8]	15	[15, 16.1, 13.9]	30	444.97
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	30
+rocksdb_vectors_rcvd_from_faiss	10
+rocksdb_vectors_read	40
+rocksdb_vectors_rows_read	5
+rocksdb_vectors_sent_to_faiss	10
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	10	10
+test	t1	vector_key_2	flat	10	10
+test	t1	vector_key_3	flat	10	10
+
+5.3 Test query with PK range possible, and PK cond possible
+
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+green	7	green4	13	[13, 14.1, 14.2]	WED	[13, 11.9, 11.8]	13	[13, 14.1, 11.9]	26	359.5
+green	7	green4	14	[14, 15.1, 15.2]	WED	[14, 12.9, 12.8]	14	[14, 15.1, 12.9]	28	428.1
+green	8	green4	15	[15, 16.1, 16.2]	WED	[15, 13.9, 13.8]	15	[15, 16.1, 13.9]	30	502.7
+green	8	green4	16	[16, 17.1, 17.2]	WED	[16, 14.9, 14.8]	16	[16, 17.1, 14.9]	32	583.3
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	8
+rocksdb_vectors_rcvd_from_faiss	4
+rocksdb_vectors_read	12
+rocksdb_vectors_rows_read	4
+rocksdb_vectors_sent_to_faiss	4
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	4	4
+test	t1	vector_key_2	flat	10	10
+test	t1	vector_key_3	flat	10	10
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+green	7	green4	13	[13, 14.1, 14.2]	WED	[13, 11.9, 11.8]	13	[13, 14.1, 11.9]	26	267.3
+green	7	green4	14	[14, 15.1, 15.2]	WED	[14, 12.9, 12.8]	14	[14, 15.1, 12.9]	28	326.7
+green	8	green4	15	[15, 16.1, 16.2]	WED	[15, 13.9, 13.8]	15	[15, 16.1, 13.9]	30	392.1
+green	8	green4	16	[16, 17.1, 17.2]	WED	[16, 14.9, 14.8]	16	[16, 17.1, 14.9]	32	463.5
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	8
+rocksdb_vectors_rcvd_from_faiss	4
+rocksdb_vectors_read	12
+rocksdb_vectors_rows_read	4
+rocksdb_vectors_sent_to_faiss	4
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	4	4
+test	t1	vector_key_2	flat	4	4
+test	t1	vector_key_3	flat	10	10
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+green	7	green4	13	[13, 14.1, 14.2]	WED	[13, 11.9, 11.8]	13	[13, 14.1, 11.9]	26	310.97
+green	7	green4	14	[14, 15.1, 15.2]	WED	[14, 12.9, 12.8]	14	[14, 15.1, 12.9]	28	374.97
+green	8	green4	15	[15, 16.1, 16.2]	WED	[15, 13.9, 13.8]	15	[15, 16.1, 13.9]	30	444.97
+green	8	green4	16	[16, 17.1, 17.2]	WED	[16, 14.9, 14.8]	16	[16, 17.1, 14.9]	32	520.97
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	8
+rocksdb_vectors_rcvd_from_faiss	4
+rocksdb_vectors_read	12
+rocksdb_vectors_rows_read	4
+rocksdb_vectors_sent_to_faiss	4
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	4	4
+test	t1	vector_key_2	flat	4	4
+test	t1	vector_key_3	flat	4	4
+
+5.4 Test non PK condition in addition to PK range + cond
+
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	6
+rocksdb_vectors_rcvd_from_faiss	0
+rocksdb_vectors_read	10
+rocksdb_vectors_rows_read	4
+rocksdb_vectors_sent_to_faiss	0
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	4	4
+test	t1	vector_key_2	flat	4	4
+test	t1	vector_key_3	flat	4	4
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	6
+rocksdb_vectors_rcvd_from_faiss	0
+rocksdb_vectors_read	10
+rocksdb_vectors_rows_read	4
+rocksdb_vectors_sent_to_faiss	0
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	4	4
+test	t1	vector_key_2	flat	4	4
+test	t1	vector_key_3	flat	4	4
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+pk_char_keypart_1	pk_bigint_keypart_2	pk_varchar_keypart_3	pk_int_keypart_4	vector1	non_key_char	vector2	non_key_int	vector3	non_key_bigint	dis
+
+Status counters
+---------------
+COUNTER	VALUE
+rocksdb_vectors_centroid_lists_read	1
+rocksdb_vectors_filtered_icp	6
+rocksdb_vectors_rcvd_from_faiss	0
+rocksdb_vectors_read	10
+rocksdb_vectors_rows_read	4
+rocksdb_vectors_sent_to_faiss	0
+
+select TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, INDEX_TYPE, 
+MIN_LIST_SIZE, MAX_LIST_SIZE from information_schema.ROCKSDB_VECTOR_INDEX;
+TABLE_SCHEMA	TABLE_NAME	INDEX_NAME	INDEX_TYPE	MIN_LIST_SIZE	MAX_LIST_SIZE
+test	t1	vector_key_1	flat	4	4
+test	t1	vector_key_2	flat	4	4
+test	t1	vector_key_3	flat	4	4
+
+6. Delete the first and second vector indexes
+
+drop index vector_key_1 on t1;
+drop index vector_key_2 on t1;
+
+6.1 Test query with PK range possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.pk_char_keypart_1 = 'green')  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.pk_char_keypart_1 = 'green')  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_3 over (pk_char_keypart_1 = 'green'), with index condition: (t1.pk_char_keypart_1 = 'green')  
+
+
+6.2 Test query with PK cond possible, range not possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.pk_varchar_keypart_3 like 'green%')  
+            -> Table scan on t1  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.pk_varchar_keypart_3 like 'green%')  
+            -> Table scan on t1  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_3, with index condition: (t1.pk_varchar_keypart_3 like 'green%')  
+
+
+6.3 Test query with PK range possible, and PK cond possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_3 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+
+6.4 Test non PK condition in addition to PK range + cond
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%') and (t1.non_key_char like 't%'))  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%') and (t1.non_key_char like 't%'))  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.non_key_char like 't%')  
+            -> Vector index scan on t1 using vector_key_3 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+
+7. Create the second vector index back
+
+create index vector_key_2 on t1 (vector2) FB_VECTOR_INDEX_TYPE 'flat';
+analyze table t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+
+7.1 Test query with PK range possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.pk_char_keypart_1 = 'green')  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_2 over (pk_char_keypart_1 = 'green'), with index condition: (t1.pk_char_keypart_1 = 'green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_3 over (pk_char_keypart_1 = 'green'), with index condition: (t1.pk_char_keypart_1 = 'green')  
+
+
+7.2 Test query with PK cond possible, range not possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.pk_varchar_keypart_3 like 'green%')  
+            -> Table scan on t1  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_2, with index condition: (t1.pk_varchar_keypart_3 like 'green%')  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_varchar_keypart_3 like 'green%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_3, with index condition: (t1.pk_varchar_keypart_3 like 'green%')  
+
+
+7.3 Test query with PK range possible, and PK cond possible
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_2 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Ordered vector index scan on t1 using vector_key_3 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+
+7.4 Test non PK condition in addition to PK range + cond
+
+explain format=tree 
+select *, fb_vector_l2(vector1, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%') and (t1.non_key_char like 't%'))  
+            -> Index lookup on t1 using PRIMARY (pk_char_keypart_1='green')  
+
+explain format=tree 
+select *, fb_vector_l2(vector2, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.non_key_char like 't%')  
+            -> Vector index scan on t1 using vector_key_2 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+explain format=tree 
+select *, fb_vector_l2(vector3, '[2.5, 3.5, 2.5]') as dis from t1 where pk_char_keypart_1 = 'green' and pk_varchar_keypart_3 like 'green4%' and non_key_char like 't%' order by dis limit 5;
+EXPLAIN
+-> Limit: 5 row(s)  
+    -> Sort: dis, limit input to 5 row(s) per chunk  
+        -> Filter: (t1.non_key_char like 't%')  
+            -> Vector index scan on t1 using vector_key_3 over (pk_char_keypart_1 = 'green'), with index condition: ((t1.pk_char_keypart_1 = 'green') and (t1.pk_varchar_keypart_3 like 'green4%'))  
+
+drop table t1;

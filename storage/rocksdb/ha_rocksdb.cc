@@ -21024,13 +21024,8 @@ bool ha_rocksdb::index_supports_vector_scan(ORDER *order, int idx) {
       for (uint part = 0;
            part < table->key_info[key_idx].user_defined_key_parts; part++) {
         if (table->key_info[key_idx].key_part[part].field == field) {
-          // vector index will always be the only user defined part
-          // i.e. part = 0
-          assert(!part);
           fld_index = key_idx;
           break;
-        } else {
-          return false;
         }
       }
     }
