@@ -130,6 +130,11 @@ SERVICE_TYPE(log_builtins) *log_bi = nullptr;
 SERVICE_TYPE(log_builtins_string) *log_bs = nullptr;
 #endif
 
+// Rocksdb hook to yield in long loops.
+extern "C" void RocksDbThreadYield() {
+  thd_check_yield(nullptr);
+}
+
 namespace myrocks {
 
 static st_global_stats global_stats;
