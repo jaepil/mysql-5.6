@@ -47,7 +47,11 @@ constexpr faiss::idx_t DUMMY_VECTOR_ID = 42;
 static void write_inverted_list_key(Rdb_string_writer &writer,
                                     const Index_id index_id,
                                     const size_t list_id) {
-  writer.write_index_id(index_id);
+  // the writer could be populated with key prefix already,
+  // do not write index id in that case
+  if (writer.is_empty()) {
+    writer.write_index_id(index_id);
+  }
   writer.write_uint64(list_id);
 }
 
@@ -315,14 +319,31 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
       return HA_EXIT_FAILURE;
     }
 
+    if (search_params.m_start_range.key) {
+      std::string buf;
+      buf.resize(search_params.m_sk_descr->max_storage_fmt_length());
+      const uint pack_size = search_params.m_sk_descr->pack_index_tuple(
+          const_cast<TABLE *>(search_params.m_tbl), search_params.m_pack_buffer,
+          reinterpret_cast<uchar *>(buf.data()),
+          search_params.m_start_range.key,
+          search_params.m_start_range.keypart_map);
+      lower_key_writer.write_slice(rocksdb::Slice(buf.data(), pack_size));
+    }
+
+    // set upper bound list id as the next list if max range is not present
+    const faiss_ivf_list_id upper_bound_list_id =
+        m_list_id +
+        (max_key_slice.empty() && upper_key_writer.is_empty() ? 1 : 0);
+    if (!lower_key_writer.is_empty() && upper_key_writer.is_empty()) {
+      // copy the same prefix to upper bound
+      upper_key_writer.write_slice(lower_key_writer.to_slice());
+    }
+
     /* create lower iterator bound using min range key, if available */
     write_inverted_list_item_key(lower_key_writer, m_index_id, m_list_id,
                                  min_key_slice);
     m_iterator_lower_bound_key.PinSelf(lower_key_writer.to_slice());
 
-    // set upper bound list id as the next list if max range is not present
-    const faiss_ivf_list_id upper_bound_list_id =
-        m_list_id + (max_key_slice.empty() ? 1 : 0);
     /* create upper iterator bound using max range key, if available */
     write_inverted_list_item_key(upper_key_writer, m_index_id,
                                  upper_bound_list_id, max_key_slice);
@@ -1028,7 +1049,8 @@ Rdb_vector_search_params Rdb_vector_db_handler::get_search_params() const {
       .m_k = m_limit,
       .m_nprobe = m_nprobe,
       .m_rangePath = m_rangePath,
-      .m_pk_index_cond = m_pk_index_cond};
+      .m_pk_index_cond = m_pk_index_cond,
+      .m_start_range = m_start_range};
   return params;
 }
 

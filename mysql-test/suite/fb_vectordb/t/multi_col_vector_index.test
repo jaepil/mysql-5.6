@@ -1,0 +1,87 @@
+disable_query_log;
+disable_warnings;
+DROP TABLE IF EXISTS t1;
+enable_warnings;
+enable_query_log;
+
+source ../include/init_ivf.inc;
+
+# 2 centroids
+insert into VECTORDB_DATA values ('id1', 'metadata', 0, JSON_OBJECT('version', 1, 'nlist', 2)), ('id1', 'quantizer', 0, '[0, 0, 0]'), ('id1', 'quantizer', 1, '[1, 1, 0]');
+
+SET FB_VECTOR_SEARCH_LIMIT_MULTIPLIER=1;
+
+echo;
+echo simple 2 column vector index;
+echo;
+CREATE TABLE t1 (
+  id BIGINT NOT NULL PRIMARY KEY,
+  vector1 JSON NOT NULL fb_vector_dimension 3,
+  name varchar(64),
+  INDEX key1(name, vector1) FB_VECTOR_INDEX_TYPE 'ivfflat' FB_VECTOR_TRAINED_INDEX_TABLE 'VECTORDB_DATA' FB_VECTOR_TRAINED_INDEX_ID 'id1'
+);
+
+insert into t1 values (1, '[1,2,3]', 'p0'), (2, '[2,22,31]', 'p1'), (3, '[10,6,5]', 'p2'), (4, '[3,9,4]', 'p3');
+insert into t1 (WITH RECURSIVE a(i) AS (SELECT 0 union all select i+1 from a where i < 100) SELECT i+10, json_array(i%2 + i * 0.01, i%2 - i * 0.01, 1), concat('p', i%4) from a);
+
+replace_numeric_round 4;
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' order by dis limit 5;
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+
+update t1 set vector1='[0,0,0]', name='p0' where id=3;
+replace_numeric_round 4;
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' order by dis limit 5;
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+
+delete from t1 where id=18;
+replace_numeric_round 4;
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' order by dis limit 5;
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+
+# test ip metric
+replace_numeric_round 4;
+select *, fb_vector_ip(vector1, '[1, 0.1, 0]') as dis from t1 where name='p0' order by dis desc limit 5;
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+
+# TODO BUG cause assertion failure in range_optimizer.cc
+# select name from t1 where name='p0';
+# select name from t1 where name>'p0' and name<'p9';
+
+drop table t1;
+
+echo;
+echo 3 column vector index;
+echo;
+CREATE TABLE t1 (
+  id BIGINT NOT NULL PRIMARY KEY,
+  vector1 JSON NOT NULL fb_vector_dimension 3,
+  name varchar(64),
+  vec_type varchar(10),
+  INDEX key1(name, vec_type, vector1) FB_VECTOR_INDEX_TYPE 'ivfflat' FB_VECTOR_TRAINED_INDEX_TABLE 'VECTORDB_DATA' FB_VECTOR_TRAINED_INDEX_ID 'id1'
+);
+
+insert into t1 values (1, '[1,2,3]', 'p0', 't0'), (2, '[2,22,31]', 'p1', 't1'), (3, '[10,6,5]', 'p2', 't2'), (4, '[3,9,4]', 'p3', 't3');
+insert into t1 (WITH RECURSIVE a(i) AS (SELECT 0 union all select i+1 from a where i < 100) SELECT i+10, json_array(i%2 + i * 0.01, i%2 - i * 0.01, 1), concat('p', i%4), concat('t', i%4) from a);
+
+replace_numeric_round 4;
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' and vec_type='t0' order by dis limit 5;
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+
+update t1 set vector1='[0,0,0]', name='p0', vec_type='t0' where id=3;
+replace_numeric_round 4;
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' and vec_type='t0' order by dis limit 5;
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+
+delete from t1 where id=18;
+replace_numeric_round 4;
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' and vec_type='t0' order by dis limit 5;
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+
+# test ip metric
+replace_numeric_round 4;
+select *, fb_vector_ip(vector1, '[1, 0.1, 0]') as dis from t1 where name='p0' and vec_type='t0' order by dis desc limit 5;
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+
+drop table t1;
+
+source ../include/cleanup_ivf.inc;

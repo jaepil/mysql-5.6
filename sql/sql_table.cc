@@ -4882,6 +4882,51 @@ static bool count_keys(const Mem_root_array<Key_spec *> &key_list,
   return false;
 }
 
+static bool prepare_vector_index_column(const Key_spec *key,
+                                        const size_t column_nr, KEY *key_info,
+                                        const Create_field *sql_field) {
+  if (!key_info->is_fb_vector_index()) {
+    return false;
+  }
+  if (column_nr != key->columns.size() - 1) {
+    // not the last part of the index
+    if (sql_field->sql_type == MYSQL_TYPE_JSON ||
+        sql_field->sql_type == MYSQL_TYPE_BLOB) {
+      my_error(ER_WRONG_ARGUMENTS, MYF(0),
+               "vector column should be the last part of a index");
+      return true;
+    }
+    return false;
+  }
+
+  // fb_vector index only support type `json not null fb_vector_dimension`
+  // or `blob not null fb_vector_dimension`
+  if (sql_field->sql_type != MYSQL_TYPE_JSON &&
+      sql_field->sql_type != MYSQL_TYPE_BLOB) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0),
+             "fb_vector index only support json/blob type");
+    return true;
+  }
+  if (sql_field->m_fb_vector_dimension <= 0) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0),
+             "fb_vector index column should have dimension set");
+    return true;
+  }
+  if (sql_field->is_nullable) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0),
+             "fb_vector index column should not be nullable");
+    return true;
+  }
+  // use column's vector dimension here
+  auto old_vector_config = key_info->fb_vector_index_config;
+  key_info->fb_vector_index_config = FB_vector_index_config(
+      old_vector_config.type(), sql_field->m_fb_vector_dimension,
+      old_vector_config.trained_index_table(),
+      old_vector_config.trained_index_id());
+
+  return false;
+}
+
 static bool prepare_key_column(THD *thd, HA_CREATE_INFO *create_info,
                                List<Create_field> *create_list,
                                const Key_spec *key, const Key_part_spec *column,
@@ -4949,31 +4994,8 @@ static bool prepare_key_column(THD *thd, HA_CREATE_INFO *create_info,
     key_info->flags |= HA_VIRTUAL_GEN_KEY;
   }
 
-  // fb_vector index only support type `json not null fb_vector_dimension`
-  // or `blob not null fb_vector_dimension`
-  if (key_info->is_fb_vector_index()) {
-    if (sql_field->sql_type != MYSQL_TYPE_JSON &&
-        sql_field->sql_type != MYSQL_TYPE_BLOB) {
-      my_error(ER_WRONG_ARGUMENTS, MYF(0),
-               "fb_vector index only support json/blob type");
-      return true;
-    }
-    if (sql_field->m_fb_vector_dimension <= 0) {
-      my_error(ER_WRONG_ARGUMENTS, MYF(0),
-               "fb_vector index column should have dimension set");
-      return true;
-    }
-    if (sql_field->is_nullable) {
-      my_error(ER_WRONG_ARGUMENTS, MYF(0),
-               "fb_vector index column should not be nullable");
-      return true;
-    }
-    // use column's vector dimension here
-    auto old_vector_config = key_info->fb_vector_index_config;
-    key_info->fb_vector_index_config = FB_vector_index_config(
-        old_vector_config.type(), sql_field->m_fb_vector_dimension,
-        old_vector_config.trained_index_table(),
-        old_vector_config.trained_index_id());
+  if (prepare_vector_index_column(key, column_nr, key_info, sql_field)) {
+    return true;
   }
 
   // JSON columns cannot be used as keys.
@@ -7250,14 +7272,6 @@ static bool prepare_fb_vector_index(const Key_spec *key, KEY *key_info) {
   if (key->type != KEYTYPE_MULTIPLE) {
     my_error(ER_WRONG_ARGUMENTS, MYF(0),
              "fb_vector index can only be KEYTYPE_MULTIPLE");
-    return true;
-  }
-
-  // column type is checked in prepare_key_column, here
-  // we only check number of columns
-  if (key->columns.size() != 1) {
-    my_error(ER_WRONG_ARGUMENTS, MYF(0),
-             "fb_vector index can only have one column");
     return true;
   }
 

@@ -1,0 +1,111 @@
+insert into VECTORDB_DATA values ('id1', 'metadata', 0, JSON_OBJECT('version', 1, 'nlist', 2)), ('id1', 'quantizer', 0, '[0, 0, 0]'), ('id1', 'quantizer', 1, '[1, 1, 0]');
+SET FB_VECTOR_SEARCH_LIMIT_MULTIPLIER=1;
+
+simple 2 column vector index
+
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON NOT NULL fb_vector_dimension 3,
+name varchar(64),
+INDEX key1(name, vector1) FB_VECTOR_INDEX_TYPE 'ivfflat' FB_VECTOR_TRAINED_INDEX_TABLE 'VECTORDB_DATA' FB_VECTOR_TRAINED_INDEX_ID 'id1'
+);
+insert into t1 values (1, '[1,2,3]', 'p0'), (2, '[2,22,31]', 'p1'), (3, '[10,6,5]', 'p2'), (4, '[3,9,4]', 'p3');
+insert into t1 (WITH RECURSIVE a(i) AS (SELECT 0 union all select i+1 from a where i < 100) SELECT i+10, json_array(i%2 + i * 0.01, i%2 - i * 0.01, 1), concat('p', i%4) from a);
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' order by dis limit 5;
+id	vector1	name	dis
+10	[0, 0, 1]	p0	1
+14	[0.04, -0.04, 1]	p0	1.0032
+18	[0.08, -0.08, 1]	p0	1.0128
+22	[0.12, -0.12, 1]	p0	1.0288
+26	[0.16, -0.16, 1]	p0	1.0512
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+HIT
+1
+update t1 set vector1='[0,0,0]', name='p0' where id=3;
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' order by dis limit 5;
+id	vector1	name	dis
+3	[0, 0, 0]	p0	0
+10	[0, 0, 1]	p0	1
+14	[0.04, -0.04, 1]	p0	1.0032
+18	[0.08, -0.08, 1]	p0	1.0128
+22	[0.12, -0.12, 1]	p0	1.0288
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+HIT
+2
+delete from t1 where id=18;
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' order by dis limit 5;
+id	vector1	name	dis
+3	[0, 0, 0]	p0	0
+10	[0, 0, 1]	p0	1
+14	[0.04, -0.04, 1]	p0	1.0032
+22	[0.12, -0.12, 1]	p0	1.0288
+26	[0.16, -0.16, 1]	p0	1.0512
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+HIT
+3
+select *, fb_vector_ip(vector1, '[1, 0.1, 0]') as dis from t1 where name='p0' order by dis desc limit 5;
+id	vector1	name	dis
+1	[1, 2, 3]	p0	1.2
+110	[1, -1, 1]	p0	0.9
+106	[0.96, -0.96, 1]	p0	0.864
+102	[0.92, -0.92, 1]	p0	0.828
+98	[0.88, -0.88, 1]	p0	0.792
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+HIT
+4
+drop table t1;
+
+3 column vector index
+
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+vector1 JSON NOT NULL fb_vector_dimension 3,
+name varchar(64),
+vec_type varchar(10),
+INDEX key1(name, vec_type, vector1) FB_VECTOR_INDEX_TYPE 'ivfflat' FB_VECTOR_TRAINED_INDEX_TABLE 'VECTORDB_DATA' FB_VECTOR_TRAINED_INDEX_ID 'id1'
+);
+insert into t1 values (1, '[1,2,3]', 'p0', 't0'), (2, '[2,22,31]', 'p1', 't1'), (3, '[10,6,5]', 'p2', 't2'), (4, '[3,9,4]', 'p3', 't3');
+insert into t1 (WITH RECURSIVE a(i) AS (SELECT 0 union all select i+1 from a where i < 100) SELECT i+10, json_array(i%2 + i * 0.01, i%2 - i * 0.01, 1), concat('p', i%4), concat('t', i%4) from a);
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' and vec_type='t0' order by dis limit 5;
+id	vector1	name	vec_type	dis
+10	[0, 0, 1]	p0	t0	1
+14	[0.04, -0.04, 1]	p0	t0	1.0032
+18	[0.08, -0.08, 1]	p0	t0	1.0128
+22	[0.12, -0.12, 1]	p0	t0	1.0288
+26	[0.16, -0.16, 1]	p0	t0	1.0512
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+HIT
+1
+update t1 set vector1='[0,0,0]', name='p0', vec_type='t0' where id=3;
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' and vec_type='t0' order by dis limit 5;
+id	vector1	name	vec_type	dis
+3	[0, 0, 0]	p0	t0	0
+10	[0, 0, 1]	p0	t0	1
+14	[0.04, -0.04, 1]	p0	t0	1.0032
+18	[0.08, -0.08, 1]	p0	t0	1.0128
+22	[0.12, -0.12, 1]	p0	t0	1.0288
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+HIT
+2
+delete from t1 where id=18;
+select *, fb_vector_l2(vector1, '[0, 0, 0]') as dis from t1 where name='p0' and vec_type='t0' order by dis limit 5;
+id	vector1	name	vec_type	dis
+3	[0, 0, 0]	p0	t0	0
+10	[0, 0, 1]	p0	t0	1
+14	[0.04, -0.04, 1]	p0	t0	1.0032
+22	[0.12, -0.12, 1]	p0	t0	1.0288
+26	[0.16, -0.16, 1]	p0	t0	1.0512
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+HIT
+3
+select *, fb_vector_ip(vector1, '[1, 0.1, 0]') as dis from t1 where name='p0' and vec_type='t0' order by dis desc limit 5;
+id	vector1	name	vec_type	dis
+1	[1, 2, 3]	p0	t0	1.2
+110	[1, -1, 1]	p0	t0	0.9
+106	[0.96, -0.96, 1]	p0	t0	0.864
+102	[0.92, -0.92, 1]	p0	t0	0.828
+98	[0.88, -0.88, 1]	p0	t0	0.792
+SELECT HIT FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
+HIT
+4
+drop table t1;

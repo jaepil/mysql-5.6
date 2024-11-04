@@ -25,6 +25,26 @@ flat	4	2	1
 drop table t1;
 SELECT INDEX_TYPE FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
 INDEX_TYPE
+
+support creating vector index with mulitple columns
+
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+name varchar(10),
+vector1 JSON NOT NULL fb_vector_dimension 4,
+INDEX vector_key_1(name, vector1) FB_VECTOR_INDEX_TYPE 'flat'
+);
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` bigint NOT NULL,
+  `name` varchar(10) DEFAULT NULL,
+  `vector1` json NOT NULL FB_VECTOR_DIMENSION 4,
+  PRIMARY KEY (`id`),
+  KEY `vector_key_1` (`name`,`vector1`) FB_VECTOR_INDEX_TYPE 'flat'
+) ENGINE=ROCKSDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+drop table t1;
+
 error case vector index column requires dimension
 CREATE TABLE t1 (
 id BIGINT NOT NULL PRIMARY KEY,
@@ -39,6 +59,14 @@ vector1 JSON NOT NULL fb_vector_dimension 4,
 INDEX vector_key_1(vector1) FB_VECTOR_INDEX_TYPE 'flat'
 ) COMMENT "ttl_duration=3600;";
 ERROR HY000: Got error 1 - 'Operation not permitted' from storage engine
+error case vector column should be the last
+CREATE TABLE t1 (
+id BIGINT NOT NULL PRIMARY KEY,
+name varchar(10),
+vector1 JSON NOT NULL fb_vector_dimension 4,
+INDEX vector_key_1(vector1, name) FB_VECTOR_INDEX_TYPE 'flat'
+);
+ERROR HY000: Incorrect arguments to vector column should be the last part of a index
 insert into VECTORDB_DATA values ('id1', 'metadata', 0, JSON_OBJECT('version', 1, 'nlist', 1)), ('id1', 'quantizer', 0, '[0, 0, 0, 0]');
 insert into VECTORDB_DATA values ('id2', 'metadata', 0, '{"version": 2}'), ('id2', 'quantizer', 0, '[0, 0, 0, 0]');
 CREATE TABLE t1 (

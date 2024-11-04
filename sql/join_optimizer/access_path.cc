@@ -436,7 +436,15 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
               path->num_output_rows(), examined_rows);
         }
         if (param.table->key_info[param.idx].is_fb_vector_index()) {
-          param.table->file->vector_index_init(*join->order.order->item,
+          // TODO should not choose the index when oder by distance
+          // is not present.
+          // init with null distance func and the index read will return
+          // empty result.
+          Item *distance_func = nullptr;
+          if (join && join->order.order && join->order.order->item) {
+            distance_func = *(join->order.order->item);
+          }
+          param.table->file->vector_index_init(distance_func,
                                                thd->get_pk_range_path());
         }
         break;
@@ -451,6 +459,18 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
           iterator = NewIterator<RefIterator<false>>(
               thd, mem_root, param.table, param.ref, param.use_order,
               path->num_output_rows(), examined_rows);
+        }
+        if (param.table->key_info[param.ref->key].is_fb_vector_index()) {
+          // TODO should not choose the index when oder by distance
+          // is not present.
+          // init with null distance func and the index read will return
+          // empty result.
+          Item *distance_func = nullptr;
+          if (join && join->order.order && join->order.order->item) {
+            distance_func = *(join->order.order->item);
+          }
+          param.table->file->vector_index_init(distance_func,
+                                               thd->get_pk_range_path());
         }
         break;
       }

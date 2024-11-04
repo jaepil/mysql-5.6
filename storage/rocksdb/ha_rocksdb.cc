@@ -12041,9 +12041,18 @@ int ha_rocksdb::index_read_intern(uchar *const buf, const uchar *const key,
   const Rdb_key_def &kd = *m_key_descr_arr[active_index_pos()];
 
   if (kd.is_vector_index()) {
+    // full key lookup not supported for vector index
+    m_full_key_lookup = false;
     auto vector_db_handler = get_vector_db_handler();
     if (pushed_idx_cond_keyno == active_index) {
       vector_db_handler->set_pk_condition(pushed_idx_cond);
+    }
+    if (key) {
+      // length is not used in start_rage param, pass 0 here
+      vector_db_handler->set_start_range({.key = key,
+                                          .length = 0,
+                                          .keypart_map = keypart_map,
+                                          .flag = find_flag});
     }
     rc = vector_db_handler->search(kd.get_vector_index(), &kd);
     if (rc) {

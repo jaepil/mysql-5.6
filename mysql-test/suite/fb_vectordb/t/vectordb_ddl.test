@@ -27,6 +27,21 @@ drop table t1;
 
 SELECT INDEX_TYPE FROM INFORMATION_SCHEMA.ROCKSDB_VECTOR_INDEX WHERE TABLE_NAME = 't1';
 
+echo;
+echo support creating vector index with mulitple columns;
+echo;
+CREATE TABLE t1 (
+  id BIGINT NOT NULL PRIMARY KEY,
+  name varchar(10),
+  vector1 JSON NOT NULL fb_vector_dimension 4,
+  INDEX vector_key_1(name, vector1) FB_VECTOR_INDEX_TYPE 'flat'
+);
+
+show create table t1;
+
+drop table t1;
+
+echo;
 echo error case vector index column requires dimension;
 error ER_WRONG_ARGUMENTS;
 CREATE TABLE t1 (
@@ -42,6 +57,15 @@ CREATE TABLE t1 (
   vector1 JSON NOT NULL fb_vector_dimension 4,
   INDEX vector_key_1(vector1) FB_VECTOR_INDEX_TYPE 'flat'
 ) COMMENT "ttl_duration=3600;";
+
+echo error case vector column should be the last;
+error ER_WRONG_ARGUMENTS;
+CREATE TABLE t1 (
+  id BIGINT NOT NULL PRIMARY KEY,
+  name varchar(10),
+  vector1 JSON NOT NULL fb_vector_dimension 4,
+  INDEX vector_key_1(vector1, name) FB_VECTOR_INDEX_TYPE 'flat'
+);
 
 # ivf test cases
 

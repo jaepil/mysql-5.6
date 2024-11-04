@@ -88,6 +88,7 @@ class Rdb_vector_search_params {
   const Rdb_key_def *m_sk_descr = nullptr;
   AccessPath *m_rangePath = nullptr;
   Item *m_pk_index_cond = nullptr;
+  key_range m_start_range{.key = nullptr};
 };
 
 /**
@@ -187,7 +188,13 @@ class Rdb_vector_db_handler {
   uint search(Rdb_vector_index *index, const Rdb_key_def *sk_descr);
 
   int vector_index_orderby_init(Item *sort_func, AccessPath *rangePath) {
+    if (!sort_func) {
+      return HA_ERR_UNSUPPORTED;
+    }
     auto *distance_func = down_cast<Item_func_fb_vector_distance *>(sort_func);
+    if (!distance_func) {
+      return HA_ERR_UNSUPPORTED;
+    }
     m_limit = distance_func->m_limit;
     m_search_type = distance_func->m_search_type;
     m_nprobe = distance_func->m_nprobe;
@@ -218,6 +225,11 @@ class Rdb_vector_db_handler {
     return HA_EXIT_SUCCESS;
   }
 
+  void set_start_range(const key_range &range) {
+    assert(range.key);
+    m_start_range = range;
+  }
+
   void vector_index_orderby_end() {
     m_search_type = FB_VECTOR_SEARCH_KNN_FIRST;
     m_metric = FB_VECTOR_INDEX_METRIC::NONE;
@@ -227,6 +239,7 @@ class Rdb_vector_db_handler {
     m_buffer.clear();
     m_pk_index_cond = nullptr;
     m_rangePath = nullptr;
+    m_start_range.key = nullptr;
     m_index_scan_result_iter = nullptr;
   }
 
@@ -250,6 +263,7 @@ class Rdb_vector_db_handler {
   uint m_nprobe = 0;
   Item *m_pk_index_cond = nullptr;
   AccessPath *m_rangePath = nullptr;
+  key_range m_start_range{.key = nullptr};
   uchar *const m_pack_buffer;
   uchar *const m_sk_packed_tuple;
   uchar *const m_end_key_packed_tuple;

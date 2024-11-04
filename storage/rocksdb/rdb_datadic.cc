@@ -3689,16 +3689,19 @@ uint Rdb_key_def::setup_vector_index(const TABLE &tbl,
     return HA_ERR_UNSUPPORTED;
   }
   KEY *key_info = &tbl.key_info[m_keyno];
-  if (key_info->actual_key_parts != 1) {
-    LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                    "vector index only supports one key part");
-    assert(false);
-    return HA_ERR_UNSUPPORTED;
+
+  uint vector_field_part = UINT_MAX;
+  for (uint i = 0; i < key_info->actual_key_parts; i++) {
+    Field *field = key_info->key_part[i].field;
+    if (field->real_type() == MYSQL_TYPE_JSON ||
+        field->real_type() == MYSQL_TYPE_BLOB) {
+      vector_field_part = i;
+      break;
+    }
   }
-  if (key_info->key_part[0].field->real_type() != MYSQL_TYPE_JSON &&
-      key_info->key_part[0].field->real_type() != MYSQL_TYPE_BLOB) {
+  if (vector_field_part != key_info->actual_key_parts - 1) {
     LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                    "vector index only supports json field");
+                    "the vector column should be the last part of a index");
     assert(false);
     return HA_ERR_UNSUPPORTED;
   }
