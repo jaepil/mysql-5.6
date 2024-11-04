@@ -55,8 +55,7 @@ std::string_view fb_vector_index_type_to_string(FB_VECTOR_INDEX_TYPE val) {
 
 static const std::map<std::string_view, FB_VECTOR_INDEX_METRIC>
     fb_vector_index_metrics{{"l2", FB_VECTOR_INDEX_METRIC::L2},
-                            {"ip", FB_VECTOR_INDEX_METRIC::IP},
-                            {"cosine", FB_VECTOR_INDEX_METRIC::COSINE}};
+                            {"ip", FB_VECTOR_INDEX_METRIC::IP}};
 
 /**
     return true on error

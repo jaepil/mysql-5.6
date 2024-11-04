@@ -62,6 +62,7 @@ class Rdb_key_def;
 class Rdb_field_packing;
 class Rdb_cf_manager;
 class Rdb_ddl_manager;
+class Rdb_unpack_func_context;
 
 class Rdb_convert_to_record_key_decoder {
  public:
@@ -72,15 +73,18 @@ class Rdb_convert_to_record_key_decoder {
       const Rdb_convert_to_record_key_decoder &decoder) = delete;
   static int decode(uchar *const buf, Rdb_field_packing *fpi, TABLE *table,
                     bool has_unpack_info, Rdb_string_reader *reader,
-                    Rdb_string_reader *unpack_reader);
+                    Rdb_string_reader *unpack_reader,
+                    Rdb_unpack_func_context *ctx);
   static int skip(const Rdb_field_packing *fpi, const Field *field,
                   Rdb_string_reader *reader, Rdb_string_reader *unpack_reader,
-                  bool covered_bitmap_format_enabled);
+                  bool covered_bitmap_format_enabled,
+                  Rdb_unpack_func_context *ctx);
 
  private:
   static int decode_field(Rdb_field_packing *fpi, TABLE *table, uchar *buf,
                           Rdb_string_reader *reader,
-                          Rdb_string_reader *unpack_reader);
+                          Rdb_string_reader *unpack_reader,
+                          Rdb_unpack_func_context *ctx);
 };
 
 /*
@@ -117,8 +121,10 @@ class Rdb_pack_field_context {
   This avoids massive changes to all the helpers whenever we need to
   add/remove arguments
 */
-struct Rdb_unpack_func_context {
+class Rdb_unpack_func_context {
+ public:
   TABLE *table;
+  rocksdb::Slice vector_codes;
 };
 
 class Rdb_key_field_iterator {
@@ -137,6 +143,7 @@ class Rdb_key_field_iterator {
   bool m_is_null;
   Rdb_field_packing *m_fpi_next;
   Rdb_field_packing *m_fpi_end;
+  Rdb_unpack_func_context m_unpack_ctx;
 
  public:
   Rdb_key_field_iterator(const Rdb_key_field_iterator &) = delete;
@@ -150,6 +157,9 @@ class Rdb_key_field_iterator {
 
   int next();
   bool has_next();
+  const Rdb_unpack_func_context &get_unpack_context() const {
+    return m_unpack_ctx;
+  }
 };
 
 struct Rdb_collation_codec;
@@ -296,6 +306,10 @@ class Rdb_key_def {
                     const rocksdb::Slice *const packed_key,
                     const rocksdb::Slice *const unpack_info,
                     const bool verify_row_debug_checksums) const;
+
+  int extract_vector_codes(TABLE *const table, const rocksdb::Slice &packed_key,
+                           const rocksdb::Slice &unpack_info,
+                           rocksdb::Slice &vector_codes) const;
 
   int decode_unpack_info(Rdb_string_reader *unp_reader, bool *has_unpack_info,
                          const char **unpack_header) const;
@@ -839,7 +853,7 @@ class Rdb_key_def {
   */
   static bool is_variable_length_field(const enum_field_types type);
 
-  Rdb_field_packing *get_pack_info(uint pack_no);
+  Rdb_field_packing *get_pack_info(uint pack_no) const;
 
   static constexpr auto INVALID_INDEX_NUMBER =
       static_cast<std::uint32_t>(dd::INVALID_OBJECT_ID);
@@ -862,6 +876,12 @@ class Rdb_key_def {
   FB_vector_index_config m_vector_index_config{};
 
   std::unique_ptr<Rdb_vector_index> m_vector_index;
+
+  [[nodiscard]] int unpack_record_inner(TABLE *const table, uchar *const buf,
+                                        const rocksdb::Slice *const packed_key,
+                                        const rocksdb::Slice *const unpack_info,
+                                        const bool verify_row_debug_checksums,
+                                        rocksdb::Slice *vector_codes) const;
 
   [[nodiscard]] uint setup_vector_index(const TABLE &tbl,
                                         const Rdb_tbl_def &tbl_def,

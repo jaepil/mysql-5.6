@@ -12042,9 +12042,10 @@ int ha_rocksdb::index_read_intern(uchar *const buf, const uchar *const key,
 
   if (kd.is_vector_index()) {
     auto vector_db_handler = get_vector_db_handler();
-    rc = vector_db_handler->search(
-        thd, table, kd.get_vector_index(), m_pk_descr.get(), &kd,
-        (pushed_idx_cond_keyno == active_index) ? pushed_idx_cond : nullptr);
+    if (pushed_idx_cond_keyno == active_index) {
+      vector_db_handler->set_pk_condition(pushed_idx_cond);
+    }
+    rc = vector_db_handler->search(kd.get_vector_index(), &kd);
     if (rc) {
       DBUG_RETURN(rc);
     }
@@ -12303,7 +12304,8 @@ int ha_rocksdb::index_read_last_map(uchar *const buf, const uchar *const key,
 Rdb_vector_db_handler *ha_rocksdb::get_vector_db_handler() {
   if (m_vector_db_handler == nullptr) {
     m_vector_db_handler = std::make_unique<Rdb_vector_db_handler>(
-        m_pack_buffer, m_sk_packed_tuple, m_end_key_packed_tuple);
+        ha_thd(), table, m_pk_descr.get(), m_pack_buffer, m_sk_packed_tuple,
+        m_end_key_packed_tuple);
   }
   return m_vector_db_handler.get();
 }

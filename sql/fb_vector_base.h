@@ -18,7 +18,6 @@
 
 #include "lex_string.h"
 #include "sql-common/json_dom.h"
-#include "sql_const.h"
 
 #ifdef WITH_FB_VECTORDB
 constexpr bool FB_VECTORDB_ENABLED = true;
@@ -94,7 +93,7 @@ class Field;
 
 enum class FB_VECTOR_INDEX_TYPE { NONE, FLAT, IVFFLAT, IVFPQ };
 
-enum class FB_VECTOR_INDEX_METRIC { NONE, L2, IP, COSINE };
+enum class FB_VECTOR_INDEX_METRIC { NONE, L2, IP };
 
 using FB_vector_dimension = uint;
 

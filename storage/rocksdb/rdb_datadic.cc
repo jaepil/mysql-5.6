@@ -80,7 +80,7 @@ void get_mem_comparable_space(const CHARSET_INFO *cs,
 */
 int Rdb_convert_to_record_key_decoder::decode_field(
     Rdb_field_packing *fpi, TABLE *table, uchar *buf, Rdb_string_reader *reader,
-    Rdb_string_reader *unpack_reader) {
+    Rdb_string_reader *unpack_reader, Rdb_unpack_func_context *ctx) {
   if (fpi->m_field_is_nullable) {
     const char *nullp;
     if (!(nullp = reader->read(1))) {
@@ -104,8 +104,7 @@ int Rdb_convert_to_record_key_decoder::decode_field(
     }
   }
 
-  Rdb_unpack_func_context ctx = {table};
-  return (fpi->m_unpack_func)(fpi, &ctx, buf + fpi->m_field_offset, reader,
+  return (fpi->m_unpack_func)(fpi, ctx, buf + fpi->m_field_offset, reader,
                               unpack_reader);
 }
 
@@ -127,7 +126,7 @@ int Rdb_convert_to_record_key_decoder::decode_field(
 int Rdb_convert_to_record_key_decoder::decode(
     uchar *const buf, Rdb_field_packing *fpi, TABLE *table,
     bool has_unpack_info, Rdb_string_reader *reader,
-    Rdb_string_reader *unpack_reader) {
+    Rdb_string_reader *unpack_reader, Rdb_unpack_func_context* ctx) {
   assert(buf != nullptr);
 
   // If we need unpack info, but there is none, tell the unpack function
@@ -136,12 +135,20 @@ int Rdb_convert_to_record_key_decoder::decode(
   bool maybe_missing_unpack = !has_unpack_info && fpi->uses_unpack_info();
 
   int res = decode_field(fpi, table, buf, reader,
-                         maybe_missing_unpack ? nullptr : unpack_reader);
+                         maybe_missing_unpack ? nullptr : unpack_reader, ctx);
 
   if (res != UNPACK_SUCCESS) {
     return HA_ERR_ROCKSDB_CORRUPT_DATA;
   }
   return HA_EXIT_SUCCESS;
+}
+
+static int unpack_skip_vector(const Rdb_field_packing *fpi,
+                              Rdb_string_reader *reader) {
+  if (!reader->read(fpi->m_max_image_len)) {
+    return UNPACK_FAILURE;
+  }
+  return UNPACK_SUCCESS;
 }
 
 /*
@@ -158,7 +165,7 @@ int Rdb_convert_to_record_key_decoder::decode(
 int Rdb_convert_to_record_key_decoder::skip(
     const Rdb_field_packing *fpi, const Field *field MY_ATTRIBUTE((__unused__)),
     Rdb_string_reader *reader, Rdb_string_reader *unp_reader,
-    bool covered_bitmap_format_enabled) {
+    bool covered_bitmap_format_enabled, Rdb_unpack_func_context *ctx) {
   /* It is impossible to unpack the column. Skip it. */
   if (fpi->m_field_is_nullable) {
     const char *nullp;
@@ -189,6 +196,19 @@ int Rdb_convert_to_record_key_decoder::skip(
       !fpi->m_unpack_info_stores_value && !covered_bitmap_format_enabled) {
     unp_reader->read(fpi->m_unpack_info_uses_two_bytes ? 2 : 1);
   }
+
+  // skip the vector codes
+  if (fpi->m_skip_func == &unpack_skip_vector) {
+    const auto vector_codes_begin = unp_reader->get_current_ptr();
+    const char *vector_codes_end;
+    if (!(vector_codes_end = unp_reader->read(fpi->m_unpack_data_len))) {
+      return HA_ERR_ROCKSDB_CORRUPT_DATA;
+    }
+    if (ctx) {
+      ctx->vector_codes = rocksdb::Slice(vector_codes_begin,
+                                         vector_codes_end - vector_codes_begin);
+    }
+  }
   return HA_EXIT_SUCCESS;
 }
 
@@ -211,6 +231,7 @@ Rdb_key_field_iterator::Rdb_key_field_iterator(
   m_is_hidden_pk =
       (key_def->m_index_type == Rdb_key_def::INDEX_TYPE_HIDDEN_PRIMARY);
   m_curr_bitmap_pos = 0;
+  m_unpack_ctx = {.table = table};
 }
 
 bool Rdb_key_field_iterator::has_next() { return m_fpi_next < m_fpi_end; }
@@ -247,7 +268,8 @@ int Rdb_key_field_iterator::next() {
     if (fpi->m_unpack_func && covered_column) {
       /* It is possible to unpack this column. Do it. */
       status = Rdb_convert_to_record_key_decoder::decode(
-          m_buf, fpi, m_table, m_has_unpack_info, m_reader, m_unp_reader);
+          m_buf, fpi, m_table, m_has_unpack_info, m_reader, m_unp_reader,
+          &m_unpack_ctx);
       if (status) {
         return status;
       }
@@ -255,7 +277,7 @@ int Rdb_key_field_iterator::next() {
     } else {
       auto field = fpi->get_field_in_table(m_table);
       status = Rdb_convert_to_record_key_decoder::skip(
-          fpi, field, m_reader, m_unp_reader, m_secondary_key);
+          fpi, field, m_reader, m_unp_reader, m_secondary_key, &m_unpack_ctx);
       if (status) {
         return status;
       }
@@ -381,6 +403,12 @@ uint Rdb_key_def::setup(const TABLE &tbl, const Rdb_tbl_def &tbl_def,
       m_vector_index_config = key_info->fb_vector_index_config;
     } else {
       m_name = HIDDEN_PK_NAME;
+    }
+
+    uint rtn = setup_vector_index(tbl, tbl_def, cmd_srv_helper);
+    if (rtn) {
+      RDB_MUTEX_UNLOCK_CHECK(m_mutex);
+      return rtn;
     }
 
     m_is_unique_sk = false;
@@ -568,12 +596,6 @@ uint Rdb_key_def::setup(const TABLE &tbl, const Rdb_tbl_def &tbl_def,
     /* Cache prefix extractor for bloom filter usage later */
     const auto opt = rdb_get_rocksdb_db()->GetOptions(&get_cf());
     m_prefix_extractor = opt.prefix_extractor;
-
-    uint rtn = setup_vector_index(tbl, tbl_def, cmd_srv_helper);
-    if (rtn) {
-      RDB_MUTEX_UNLOCK_CHECK(m_mutex);
-      return rtn;
-    }
 
     /*
       This should be the last member variable set before releasing the mutex
@@ -1644,6 +1666,15 @@ int Rdb_key_def::decode_unpack_info(Rdb_string_reader *unp_reader,
   return HA_EXIT_SUCCESS;
 }
 
+int Rdb_key_def::extract_vector_codes(TABLE *const table,
+                                      const rocksdb::Slice &packed_key,
+                                      const rocksdb::Slice &unpack_info,
+                                      rocksdb::Slice &vector_codes) const {
+  return unpack_record_inner(
+      table, /**buf*/ table->record[0], &packed_key, &unpack_info,
+      /**verify_row_debug_checksums */ false, &vector_codes);
+}
+
 /*
   Take mem-comparable form and unpack_info and unpack it to Table->record
 
@@ -1654,11 +1685,33 @@ int Rdb_key_def::decode_unpack_info(Rdb_string_reader *unp_reader,
     HA_EXIT_SUCCESS    OK
     other              HA_ERR error code
 */
-
 int Rdb_key_def::unpack_record(TABLE *const table, uchar *const buf,
                                const rocksdb::Slice *const packed_key,
                                const rocksdb::Slice *const unpack_info,
                                const bool verify_row_debug_checksums) const {
+  return unpack_record_inner(table, buf, packed_key, unpack_info,
+                             verify_row_debug_checksums,
+                             /** vector_codes*/ nullptr);
+}
+
+/*
+  Take mem-comparable form and unpack_info and unpack it to Table->record
+
+  @detail
+    not all indexes support this
+
+  @param[OUT] vector_codes. when set, only encoded vector is extracted and
+  returned in the pointer location.
+
+  @return
+    HA_EXIT_SUCCESS    OK
+    other              HA_ERR error code
+*/
+int Rdb_key_def::unpack_record_inner(TABLE *const table, uchar *const buf,
+                               const rocksdb::Slice *const packed_key,
+                               const rocksdb::Slice *const unpack_info,
+                               const bool verify_row_debug_checksums, 
+                               rocksdb::Slice *vector_codes) const {
   Rdb_string_reader reader(packed_key);
   Rdb_string_reader unp_reader = Rdb_string_reader::read_or_empty(unpack_info);
 
@@ -1709,6 +1762,10 @@ int Rdb_key_def::unpack_record(TABLE *const table, uchar *const buf,
     if (unlikely(err)) {
       return err;
     }
+  }
+
+  if (vector_codes) {
+    *vector_codes = iter.get_unpack_context().vector_codes;
   }
 
   /*
@@ -3598,7 +3655,7 @@ int Rdb_key_def::unpack_simple(Rdb_field_packing *const fpi,
                                 fpi->m_charset_codec, ptr, len, dst);
 }
 
-Rdb_field_packing *Rdb_key_def::get_pack_info(uint pack_no) {
+Rdb_field_packing *Rdb_key_def::get_pack_info(uint pack_no) const {
   return &m_pack_info[pack_no];
 }
 
@@ -4059,6 +4116,9 @@ bool Rdb_field_packing::setup(const Rdb_key_def *const key_descr,
     assert(!m_make_unpack_info_func);
     assert(!m_unpack_func);
     m_make_unpack_info_func = make_unpack_vector;
+    m_skip_func = unpack_skip_vector;
+    // vector index should be initialized at this point
+    m_unpack_data_len = key_descr->get_vector_index()->code_size();
     return false;
   }
 

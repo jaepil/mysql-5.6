@@ -71,9 +71,23 @@ class Rdb_vector_index_info {
 
 class Rdb_vector_search_params {
  public:
+  THD *m_thd = nullptr;
+  const TABLE *const m_tbl = nullptr;
+  const Rdb_key_def *m_pk_descr = nullptr;
+
+  // buffers
+  uchar *const m_pack_buffer = nullptr;
+  uchar *const m_sk_packed_tuple = nullptr;
+  uchar *const m_end_key_packed_tuple = nullptr;
+
   FB_VECTOR_INDEX_METRIC m_metric = FB_VECTOR_INDEX_METRIC::NONE;
   uint m_k = 0;
   uint m_nprobe = 0;
+  std::vector<float> *m_query_vector = nullptr;
+
+  const Rdb_key_def *m_sk_descr = nullptr;
+  AccessPath *m_rangePath = nullptr;
+  Item *m_pk_index_cond = nullptr;
 };
 
 /**
@@ -100,19 +114,11 @@ class Rdb_vector_index {
                              Rdb_vector_index_assignment &assignment) = 0;
 
   virtual uint index_scan(
-      THD *thd, const TABLE *const tbl, Item *pk_index_cond,
-      AccessPath *rangePath, uchar *const pack_buffer,
-      uchar *const sk_packed_tuple, uchar *const end_key_packed_tuple,
-      const Rdb_key_def *pk_descr, const Rdb_key_def *sk_descr,
-      std::vector<float> &query_vector, uint nprobe,
+      Rdb_vector_search_params &params,
       std::unique_ptr<Rdb_vector_db_iterator> &index_scan_result_iter) = 0;
 
   virtual uint knn_search(
-      THD *thd, const TABLE *const tbl, Item *pk_index_cond,
-      AccessPath *rangePath, uchar *const pack_buffer,
-      uchar *const sk_packed_tuple, uchar *const end_key_packed_tuple,
-      const Rdb_key_def *pk_descr, const Rdb_key_def *sk_descr,
-      std::vector<float> &query_vector, Rdb_vector_search_params &params,
+      Rdb_vector_search_params &params,
       std::vector<std::pair<std::string, float>> &result) = 0;
   /**
     scans all vectors in index and populate counters
@@ -123,6 +129,8 @@ class Rdb_vector_index {
   virtual Rdb_vector_index_info dump_info() = 0;
 
   virtual FB_vector_dimension dimension() const = 0;
+
+  virtual uint code_size() const = 0;
 
   virtual uint setup(const std::string &db_name [[maybe_unused]],
                      Rdb_cmd_srv_helper &cmd_srv_helper [[maybe_unused]]) {
@@ -143,9 +151,14 @@ uint create_vector_index(Rdb_cmd_srv_helper &cmd_srv_helper,
  */
 class Rdb_vector_db_handler {
  public:
-  Rdb_vector_db_handler(uchar *const pack_buffer, uchar *const sk_packed_tuple,
+  Rdb_vector_db_handler(THD *thd, const TABLE *const tbl,
+                        const Rdb_key_def *pk_descr, uchar *const pack_buffer,
+                        uchar *const sk_packed_tuple,
                         uchar *const end_key_packed_tuple)
-      : m_pack_buffer(pack_buffer),
+      : m_thd(thd),
+        m_tbl(tbl),
+        m_pk_descr(pk_descr),
+        m_pack_buffer(pack_buffer),
         m_sk_packed_tuple(sk_packed_tuple),
         m_end_key_packed_tuple(end_key_packed_tuple) {}
 
@@ -171,17 +184,7 @@ class Rdb_vector_db_handler {
 
   uint current_key(std::string &key) const;
 
-  uint search(THD *thd, const TABLE *const tbl, Rdb_vector_index *index,
-              const Rdb_key_def *pk_descr, const Rdb_key_def *sk_descr,
-              Item *pk_index_cond);
-
-  uint index_scan(THD *thd, const TABLE *const tbl, Rdb_vector_index *index,
-                  const Rdb_key_def *pk_descr, const Rdb_key_def *sk_descr,
-                  Item *pk_index_cond);
-
-  uint knn_search(THD *thd, const TABLE *const tbl, Rdb_vector_index *index,
-                  const Rdb_key_def *pk_descr, const Rdb_key_def *sk_descr,
-                  Item *pk_index_cond);
+  uint search(Rdb_vector_index *index, const Rdb_key_def *sk_descr);
 
   int vector_index_orderby_init(Item *sort_func, AccessPath *rangePath) {
     auto *distance_func = down_cast<Item_func_fb_vector_distance *>(sort_func);
@@ -222,14 +225,19 @@ class Rdb_vector_db_handler {
     m_limit = 0;
     m_nprobe = 0;
     m_buffer.clear();
+    m_pk_index_cond = nullptr;
     m_rangePath = nullptr;
+    m_index_scan_result_iter = nullptr;
+  }
 
-    if (m_index_scan_result_iter) {
-      m_index_scan_result_iter = nullptr;
-    }
+  void set_pk_condition(Item *pk_index_cond) {
+    m_pk_index_cond = pk_index_cond;
   }
 
  private:
+  THD *m_thd;
+  const TABLE *const m_tbl;
+  const Rdb_key_def *m_pk_descr;
   // input vector from the USER query,
   std::vector<float> m_buffer;
   enum_fb_vector_search_type m_search_type = FB_VECTOR_SEARCH_KNN_FIRST;
@@ -238,15 +246,17 @@ class Rdb_vector_db_handler {
   std::unique_ptr<Rdb_vector_db_iterator> m_index_scan_result_iter = nullptr;
   FB_VECTOR_INDEX_METRIC m_metric = FB_VECTOR_INDEX_METRIC::NONE;
   // LIMIT associated with the ORDER BY clause
-  uint m_limit;
-  uint m_nprobe;
+  uint m_limit = 0;
+  uint m_nprobe = 0;
+  Item *m_pk_index_cond = nullptr;
   AccessPath *m_rangePath = nullptr;
   uchar *const m_pack_buffer;
   uchar *const m_sk_packed_tuple;
   uchar *const m_end_key_packed_tuple;
 
-  uint decode_value_to_buffer(Field *field, FB_vector_dimension dimension,
-                              std::vector<float> &buffer);
+  Rdb_vector_search_params get_search_params() const;
+
+  uint knn_search(Rdb_vector_index *index, Rdb_vector_search_params &params);
 };
 
 }  // namespace myrocks

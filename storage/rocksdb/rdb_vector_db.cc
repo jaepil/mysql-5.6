@@ -20,12 +20,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <string_view>
 #include "ha_rocksdb.h"
 #include "rdb_buff.h"
 #include "rdb_cmd_srv_helper.h"
+#include "rdb_datadic.h"
 #include "rdb_global.h"
-#include "rdb_iterator.h"
 #include "rdb_utils.h"
 #include "sql/range_optimizer/range_optimizer.h"
 #ifdef WITH_FB_VECTORDB
@@ -70,69 +69,17 @@ static void write_inverted_list_item_key(Rdb_string_writer &writer,
 }
 
 /**
-read and verify key prefix
-*/
-static uint read_inverted_list_key(Rdb_string_reader &reader,
-                                   const Index_id index_id, size_t list_id) {
-  Index_id actual_index_id;
-  if (reader.read_index_id(&actual_index_id)) {
-    LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                    "Failed to read index id for key in index %d", index_id);
-    return HA_ERR_ROCKSDB_CORRUPT_DATA;
-  }
-  if (actual_index_id != index_id) {
-    LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                    "Invalid index id for key in index %d, actual value %d",
-                    index_id, actual_index_id);
-    assert(false);
-    return HA_ERR_ROCKSDB_CORRUPT_DATA;
-  }
-
-  std::uint64_t actual_list_id;
-  if (reader.read_uint64(&actual_list_id)) {
-    LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                    "Failed to read list id for key in index %d", index_id);
-    return HA_ERR_ROCKSDB_CORRUPT_DATA;
-  }
-  if (actual_list_id != list_id) {
-    LogPluginErrMsg(
-        ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-        "Invalid list id for key in index %d, actual value %" PRIu64, index_id,
-        actual_list_id);
-    return HA_ERR_ROCKSDB_CORRUPT_DATA;
-  }
-  return HA_EXIT_SUCCESS;
-}
-
-/**
   context passed to inverted list.
   no need to synchronize here, as we set openmp threads to 1.
 */
 class Rdb_faiss_inverted_list_context {
  public:
   explicit Rdb_faiss_inverted_list_context(
-      THD *thd, const TABLE *const tbl, Item *pk_index_cond,
-      AccessPath *rangePath, uchar *const pack_buffer,
-      uchar *const sk_packed_tuple, uchar *const end_key_packed_tuple,
-      const Rdb_key_def *pk_descr, const Rdb_key_def *sk_descr)
-      : m_thd(thd),
-        m_tbl(tbl),
-        m_pk_index_cond(pk_index_cond),
-        m_rangePath(rangePath),
-        m_pack_buffer(pack_buffer),
-        m_sk_packed_tuple(sk_packed_tuple),
-        m_end_key_packed_tuple(end_key_packed_tuple),
-        m_pk_descr(pk_descr),
-        m_sk_descr(sk_descr) {}
-  THD *m_thd;
-  const TABLE *const m_tbl;
-  Item *m_pk_index_cond;
-  AccessPath *m_rangePath;
-  uchar *const m_pack_buffer;
-  uchar *const m_sk_packed_tuple;
-  uchar *const m_end_key_packed_tuple;
-  const Rdb_key_def *m_pk_descr;
-  const Rdb_key_def *m_sk_descr;
+      Rdb_vector_search_params &search_params)
+      : m_search_params{search_params} {}
+  // the context object lives beyond the initial search call,
+  // need to keep a copy of search params here
+  Rdb_vector_search_params m_search_params;
   uint m_error = HA_EXIT_SUCCESS;
   std::size_t m_current_list_size = 0;
   // list id to list size pairs
@@ -223,9 +170,10 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
   };
 
   range_next_flags get_next_range() const {
-    if (m_context->m_rangePath) {
+    const auto &params = m_context->m_search_params;
+    if (params.m_rangePath) {
       /* if one or more ranges were pushed down */
-      const auto &param = m_context->m_rangePath->index_range_scan();
+      const auto &param = params.m_rangePath->index_range_scan();
       const int num_ranges = param.num_ranges;
       if (m_cur_range < num_ranges - 1) {
         m_cur_range++;
@@ -280,17 +228,12 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
     Rdb_string_writer lower_key_writer, upper_key_writer;
     key_range min_key, max_key;
     rocksdb::Slice min_key_slice, max_key_slice;
-    /*
-       If the last range is open ended, the next (contiguous) list should
-       be used as the as upper iterator bound. This will be true in two
-       scenarios, see usage below.
-     */
-    bool last_range_open_ended = false;
 
     auto is_range_available = get_next_range();
 
+    const auto &search_params = m_context->m_search_params;
     if (is_range_available == RANGE_NEXT_FOUND) {
-      const auto &param = m_context->m_rangePath->index_range_scan();
+      const auto &param = search_params.m_rangePath->index_range_scan();
       const auto ranges = param.ranges;
 
       const auto cur_range = ranges[m_cur_range];
@@ -303,11 +246,12 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
            prefix in mem-comparable format
          */
         const auto min_key_packed_size =
-            m_context->m_pk_descr->pack_index_tuple(
-                const_cast<TABLE *>(m_context->m_tbl), m_context->m_pack_buffer,
-                m_context->m_sk_packed_tuple, min_key.key, min_key.keypart_map);
+            search_params.m_pk_descr->pack_index_tuple(
+                const_cast<TABLE *>(search_params.m_tbl),
+                search_params.m_pack_buffer, search_params.m_sk_packed_tuple,
+                min_key.key, min_key.keypart_map);
 
-        min_key_slice = rocksdb::Slice((char *)m_context->m_sk_packed_tuple,
+        min_key_slice = rocksdb::Slice((char *)search_params.m_sk_packed_tuple,
                                        min_key_packed_size);
       }
       /*
@@ -321,9 +265,10 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
            prefix in mem-comparable format
          */
         const auto max_key_packed_size =
-            m_context->m_pk_descr->pack_index_tuple(
-                const_cast<TABLE *>(m_context->m_tbl), m_context->m_pack_buffer,
-                m_context->m_end_key_packed_tuple, max_key.key,
+            search_params.m_pk_descr->pack_index_tuple(
+                const_cast<TABLE *>(search_params.m_tbl),
+                search_params.m_pack_buffer,
+                search_params.m_end_key_packed_tuple, max_key.key,
                 max_key.keypart_map);
 
         if ((min_key.flag == HA_READ_KEY_EXACT) ||
@@ -341,20 +286,12 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
              In both cases, we need the successor key to make sure the
              upper bound includes all valid keys in the range provided
            */
-          m_context->m_pk_descr->successor(m_context->m_end_key_packed_tuple,
-                                           max_key_packed_size);
+          search_params.m_pk_descr->successor(
+              search_params.m_end_key_packed_tuple, max_key_packed_size);
         }
 
         max_key_slice = rocksdb::Slice(
-            (char *)m_context->m_end_key_packed_tuple, max_key_packed_size);
-      } else {
-        /*
-           if max range key is not present, then the max_key_slice will stay
-           as a zero length string, and this is handled.
-          */
-        last_range_open_ended = true;
-        /* this ensures that (list_id + 1) is used for the case of an
-         * open ended last range */
+            (char *)search_params.m_end_key_packed_tuple, max_key_packed_size);
       }
     } else if (is_range_available == RANGE_NEXT_EOF) {
       /*
@@ -369,7 +306,6 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
         Cover the case when no ranges were pushed down, and we need
         to create a single range for the entire list
        */
-      last_range_open_ended = true;
       /* this will ensure (list_id + 1) is used for the case of a single range
          for the entire list
        */
@@ -384,15 +320,17 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
                                  min_key_slice);
     m_iterator_lower_bound_key.PinSelf(lower_key_writer.to_slice());
 
+    // set upper bound list id as the next list if max range is not present
+    const faiss_ivf_list_id upper_bound_list_id =
+        m_list_id + (max_key_slice.empty() ? 1 : 0);
     /* create upper iterator bound using max range key, if available */
     write_inverted_list_item_key(upper_key_writer, m_index_id,
-                                 m_list_id + last_range_open_ended,
-                                 max_key_slice);
+                                 upper_bound_list_id, max_key_slice);
     m_iterator_upper_bound_key.PinSelf(upper_key_writer.to_slice());
 
     /* set up a new RocksDB iterator using the newly minted bounds */
     m_iterator = rdb_tx_get_iterator(
-        m_context->m_thd, m_cf, /* skip_bloom_filter */ true,
+        search_params.m_thd, m_cf, /* skip_bloom_filter */ true,
         m_iterator_lower_bound_key, m_iterator_upper_bound_key,
         /* snapshot */ nullptr, TABLE_TYPE::USER_TABLE);
     m_iterator->SeekToFirst();
@@ -403,9 +341,8 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
   void next() override { m_iterator->Next(); }
 
   bool is_available() const override {
-    THD *thd = m_context->m_thd;
-    std::string sk;
-    std::string sk_value;
+    const auto &params = m_context->m_search_params;
+    THD *thd = params.m_thd;
     rocksdb::Slice key_slice;
     rocksdb::Slice value_slice;
 
@@ -421,16 +358,13 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
       /* if there's no PK condition to filter on, then break and return
        * status to FAISS right away
        */
-      if (!m_context->m_pk_index_cond) break;
+      if (!params.m_pk_index_cond) break;
 
       /* get the SK tuple from rocksdb iterator */
-      m_context->m_error = get_key_and_value(sk, sk_value);
+      m_context->m_error = get_key_and_value(key_slice, value_slice);
 
       /* if there's an error, terminatate the iterator in FAISS */
       if (m_context->m_error) break;
-
-      key_slice = rocksdb::Slice(sk);
-      value_slice = rocksdb::Slice(sk_value);
 
       DBUG_EXECUTE_IF("missing_unpack_info", value_slice.clear(););
 
@@ -443,15 +377,15 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
        * sizeof(faiss_ivf_list_id)
 
        */
-      m_context->m_error = m_context->m_sk_descr->unpack_record(
-          const_cast<TABLE *>(m_context->m_tbl), m_context->m_tbl->record[0],
+      m_context->m_error = params.m_sk_descr->unpack_record(
+          const_cast<TABLE *>(params.m_tbl), params.m_tbl->record[0],
           &key_slice, &value_slice, false);
 
       /* propagate error and terminate iterator in case of unpacking error */
       if (m_context->m_error) break;
 
       /* evaluate PK condition and filter */
-      if (m_context->m_pk_index_cond->val_int()) break;
+      if (params.m_pk_index_cond->val_int()) break;
 
       /* vector got filtered out, increment vectors_filtered_icp counter */
       rocksdb_vectors_filtered_icp++;
@@ -461,10 +395,6 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
          and the VECTOR ITERATOR access methods
        */
       rocksdb_vectors_read++;
-
-      /* clear buffers for next round */
-      sk.clear();
-      sk_value.clear();
 
       /* move on to the next record */
       m_iterator->Next();
@@ -487,136 +417,31 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
     return available;
   }
 
-  uint get_key_and_value(std::string &key, std::string &value,
-                         bool need_value = true) const {
+  uint get_key_and_value(rocksdb::Slice &key, rocksdb::Slice &value) const {
     assert(m_context->m_error == false);
     assert(m_iterator->Valid());
 
-    rocksdb::Slice key_slice = m_iterator->key();
-    Rdb_string_reader key_reader(&key_slice);
-
-    // validate the key format
-    uint rtn = read_inverted_list_key(key_reader, m_index_id, m_list_id);
-    if (rtn) {
-      return rtn;
-    }
-    const auto pk_size = key_reader.remaining_bytes();
-    if (pk_size == 0) {
-      LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                      "Invalid pk in index %d, list id %lu", m_index_id,
-                      m_list_id);
-      return HA_ERR_ROCKSDB_CORRUPT_DATA;
-    }
-    // copy the key bytes
-    key = key_slice.ToString();
-
-    if (!need_value) {
-      return HA_EXIT_SUCCESS;
-    }
-
-    /*
-      Vector index Value format:
-      [DATA TAG] [VECTOR CODES] [UNPACK INFO FOR CHARS/VARCHARS etc]
-
-      To unpack CHARs and VARCHARs, we need to have a complete VALUE
-      corresponding to the KEY above. This is needed to be able to
-      evaluate PK query conditions on CHAR/VARCHAR PK key parts.
-
-      The vector codes are not expected in VALUE during the unpacking,
-      and the following code recreates VALUE minus the vector codes.
-
-     */
-    rocksdb::Slice value_slice = m_iterator->value();
-    unsigned long int value_bytes = value_slice.size() - m_code_size;
-    if (value_bytes < 0) {
-      LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                      "Invalid value size %lu for key in index %d, list id %lu",
-                      value_slice.size(), m_index_id, m_list_id);
-      return HA_ERR_ROCKSDB_CORRUPT_DATA;
-    }
-    if (value_bytes > 0) {
-      char tag = value_slice.data()[0];
-      if (!Rdb_key_def::is_unpack_data_tag(tag)) {
-        LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                        "Invalid data tag for key in index %d, list id %lu",
-                        m_index_id, m_list_id);
-        return HA_ERR_ROCKSDB_CORRUPT_DATA;
-      }
-      auto header_size = Rdb_key_def::get_unpack_header_size(tag);
-      if ((size_t)value_bytes < header_size) {
-        LogPluginErrMsg(
-            ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-            "Invalid value size %lu for key in index %d, list id %lu",
-            value_slice.size(), m_index_id, m_list_id);
-        return HA_ERR_ROCKSDB_CORRUPT_DATA;
-      }
-
-      value.reserve(value_bytes);
-      value.append(value_slice.data(), header_size);
-      value.append(value_slice.data() + header_size + m_code_size,
-                   value_bytes - header_size);
-    }
-    assert(value.size() == value_bytes);
+    key = m_iterator->key();
+    value = m_iterator->value();
 
     return HA_EXIT_SUCCESS;
   }
 
-  uint get_key_and_codes(std::string &key, rocksdb::Slice &codes) const {
+  uint get_key_and_codes(rocksdb::Slice &key, rocksdb::Slice &codes) const {
     assert(m_context->m_error == false);
     assert(m_iterator->Valid());
 
-    rocksdb::Slice key_slice = m_iterator->key();
-    Rdb_string_reader key_reader(&key_slice);
-
-    // validate the key format
-    uint rtn = read_inverted_list_key(key_reader, m_index_id, m_list_id);
-    if (rtn) {
-      return rtn;
-    }
-    const auto pk_size = key_reader.remaining_bytes();
-    if (pk_size == 0) {
-      LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                      "Invalid pk in index %d, list id %lu", m_index_id,
-                      m_list_id);
-      return HA_ERR_ROCKSDB_CORRUPT_DATA;
-    }
-    // copy the key bytes
-    key = key_slice.ToString();
-
+    key = m_iterator->key();
     rocksdb::Slice value = m_iterator->value();
-    codes = value;
-    // after consolidating write logic to use Rdb_key_def::pack_record,
-    // the vector codes is prefixed with data tag, and followed by
-    // other column data.
-    // for data written before the change, the value is exactly m_code_size.
-    int extra_bytes = codes.size() - m_code_size;
-    if (extra_bytes < 0) {
-      LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                      "Invalid value size %lu for key in index %d, list id %lu",
-                      codes.size(), m_index_id, m_list_id);
-      return HA_ERR_ROCKSDB_CORRUPT_DATA;
-    }
-    if (extra_bytes > 0) {
-      char tag = codes.data()[0];
-      if (!Rdb_key_def::is_unpack_data_tag(tag)) {
-        LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                        "Invalid data tag for key in index %d, list id %lu",
-                        m_index_id, m_list_id);
-        return HA_ERR_ROCKSDB_CORRUPT_DATA;
-      }
-      auto header_size = Rdb_key_def::get_unpack_header_size(tag);
-      if ((size_t)extra_bytes < header_size) {
-        LogPluginErrMsg(
-            ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-            "Invalid value size %lu for key in index %d, list id %lu",
-            codes.size(), m_index_id, m_list_id);
-        return HA_ERR_ROCKSDB_CORRUPT_DATA;
-      }
 
-      codes.remove_prefix(header_size);
-      codes.remove_suffix(extra_bytes - header_size);
+    auto key_descr = m_context->m_search_params.m_sk_descr;
+    auto unpack_rtn = key_descr->extract_vector_codes(
+        const_cast<TABLE *const>(m_context->m_search_params.m_tbl), key, value,
+        codes);
+
+    if (unpack_rtn) {
+      return unpack_rtn;
     }
-    assert(codes.size() == m_code_size);
 
     /* Vector was read from disk, increment vectors_read counter
        This covers the ANALYZE TABLE path and the FAISS triggered path
@@ -629,7 +454,7 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
   }
 
   std::pair<faiss::idx_t, const uint8_t *> get_id_and_codes() override {
-    std::string key;
+    rocksdb::Slice key;
     rocksdb::Slice codes;
     uint rtn = get_key_and_codes(key, codes);
     if (rtn) {
@@ -640,11 +465,12 @@ class Rdb_vector_iterator : public faiss::InvertedListsIterator {
       m_codes_buffer.resize(m_code_size);
       return {vector_id, m_codes_buffer.data()};
     } else {
-      /* vector is being sent to FAISS , increment vectors_sent_to_faiss counter */
+      /* vector is being sent to FAISS , increment vectors_sent_to_faiss counter
+       */
       rocksdb_vectors_sent_to_faiss++;
     }
 
-    faiss::idx_t vector_id = m_context->add_key(key);
+    faiss::idx_t vector_id = m_context->add_key(key.ToString());
     return {vector_id, reinterpret_cast<const uint8_t *>(codes.data())};
   }
 
@@ -698,12 +524,16 @@ class Rdb_vector_list_iterator : public Rdb_vector_db_iterator {
   void next() override { m_current_iterator->next(); }
 
   uint get_key(std::string &key) override {
-    std::string value;
-    uint rtn = m_current_iterator->get_key_and_value(key, value, false);
+    rocksdb::Slice key_slice;
+    rocksdb::Slice value_slice;
+    uint rtn = m_current_iterator->get_key_and_value(key_slice, value_slice);
     if (rtn) {
       m_error = rtn;
       return rtn;
     }
+
+    key = key_slice.ToString();
+
     /* Vector was read from disk, increment vectors_read counter
        This covers the VECTOR ITERATOR path
      */
@@ -824,31 +654,25 @@ class Rdb_vector_index_ivf : public Rdb_vector_index {
     return m_index_def.dimension();
   }
 
-  virtual uint index_scan(THD *thd, const TABLE *const tbl, Item *pk_index_cond,
-                          AccessPath *rangePath, uchar *const pack_buffer,
-                          uchar *const sk_packed_tuple,
-                          uchar *const end_key_packed_tuple,
-                          const Rdb_key_def *pk_descr,
-                          const Rdb_key_def *sk_descr,
-                          std::vector<float> &query_vector, uint nprobe,
+  uint code_size() const override { return m_index_l2->code_size; }
+
+  virtual uint index_scan(Rdb_vector_search_params &params,
                           std::unique_ptr<Rdb_vector_db_iterator>
                               &index_scan_result_iter) override {
     m_hit++;
 
     constexpr faiss::idx_t vector_count = 1;
-    std::vector<faiss::idx_t> vector_ids(nprobe);
-    std::vector<float> distances(nprobe);
+    std::vector<faiss::idx_t> vector_ids(params.m_nprobe);
+    std::vector<float> distances(params.m_nprobe);
 
     /*
        do a coarse search through centroids configured for this vector index,
        and get a list of the closest <nprobe> centroids
      */
-    m_quantizer->search(vector_count, query_vector.data(), nprobe,
-                        distances.data(), vector_ids.data());
+    m_quantizer->search(vector_count, params.m_query_vector->data(),
+                        params.m_nprobe, distances.data(), vector_ids.data());
 
-    Rdb_faiss_inverted_list_context context(
-        thd, tbl, pk_index_cond, rangePath, pack_buffer, sk_packed_tuple,
-        end_key_packed_tuple, pk_descr, sk_descr);
+    Rdb_faiss_inverted_list_context context(params);
 
     /*
        set up an iterator to go through the centroid lists in increasing
@@ -862,11 +686,7 @@ class Rdb_vector_index_ivf : public Rdb_vector_index {
   }
 
   virtual uint knn_search(
-      THD *thd, const TABLE *const tbl, Item *pk_index_cond,
-      AccessPath *rangePath, uchar *const pack_buffer,
-      uchar *const sk_packed_tuple, uchar *const end_key_packed_tuple,
-      const Rdb_key_def *pk_descr, const Rdb_key_def *sk_descr,
-      std::vector<float> &query_vector, Rdb_vector_search_params &params,
+      Rdb_vector_search_params &params,
       std::vector<std::pair<std::string, float>> &result) override {
     m_hit++;
     faiss::IndexIVF *index = m_index_l2.get();
@@ -880,12 +700,10 @@ class Rdb_vector_index_ivf : public Rdb_vector_index {
     faiss::IVFSearchParameters search_params;
 
     search_params.nprobe = params.m_nprobe;
-    Rdb_faiss_inverted_list_context context(
-        thd, tbl, pk_index_cond, rangePath, pack_buffer, sk_packed_tuple,
-        end_key_packed_tuple, pk_descr, sk_descr);
+    Rdb_faiss_inverted_list_context context(params);
     search_params.inverted_list_context = &context;
-    index->search(vector_count, query_vector.data(), k, distances.data(),
-                  vector_ids.data(), &search_params);
+    index->search(vector_count, params.m_query_vector->data(), k,
+                  distances.data(), vector_ids.data(), &search_params);
     if (context.m_error) {
       return context.m_error;
     }
@@ -904,21 +722,15 @@ class Rdb_vector_index_ivf : public Rdb_vector_index {
   virtual uint analyze(THD *thd, uint64_t max_num_rows_scanned,
                        std::atomic<THD::killed_state> *killed) override {
     assert(thd);
-    std::string key;
-    rocksdb::Slice codes;
     uint64_t ntotal = 0;
     for (std::size_t i = 0; i < m_list_size_stats.size(); i++) {
       std::size_t list_size = 0;
-      Rdb_faiss_inverted_list_context context(thd, nullptr, nullptr, nullptr,
-                                              nullptr, nullptr, nullptr,
-                                              nullptr, nullptr);
+      // only thd is used for this
+      Rdb_vector_search_params params{.m_thd = thd};
+      Rdb_faiss_inverted_list_context context(params);
       Rdb_vector_iterator vector_iter(&context, m_index_id, *m_cf_handle,
                                       m_index_l2->code_size, i);
       while (vector_iter.is_available()) {
-        uint rtn = vector_iter.get_key_and_codes(key, codes);
-        if (rtn) {
-          return rtn;
-        }
         list_size++;
         ntotal++;
         if (max_num_rows_scanned > 0 && ntotal > max_num_rows_scanned) {
@@ -1062,19 +874,6 @@ class Rdb_vector_index_ivf : public Rdb_vector_index {
   std::unique_ptr<Rdb_faiss_inverted_list> m_inverted_list;
   std::vector<std::atomic<long>> m_list_size_stats;
 
-  uint delete_vector_from_list(rocksdb::WriteBatchBase *write_batch,
-                               const uint64 list_id, const rocksdb::Slice &pk) {
-    Rdb_string_writer key_writer;
-    write_inverted_list_item_key(key_writer, m_index_id, list_id, pk);
-    auto status = write_batch->Delete(m_cf_handle.get(), key_writer.to_slice());
-    if (!status.ok()) {
-      LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                      "Failed to write codes for index %d", m_index_id);
-      return ha_rocksdb::rdb_error_to_mysql(status);
-    }
-    return HA_EXIT_SUCCESS;
-  }
-
   uint64 get_list_id(const float *data) const {
     if (m_index_l2->nlist == 1) {
       return 0;
@@ -1166,28 +965,11 @@ uint create_vector_index(Rdb_cmd_srv_helper &cmd_srv_helper [[maybe_unused]],
 
 #endif
 
-// Rdb_vector_db_handler::Rdb_vector_db_handler() {}
-
-uint Rdb_vector_db_handler::search(THD *thd, const TABLE *const tbl,
-                                   Rdb_vector_index *index,
-                                   const Rdb_key_def *pk_descr,
-                                   const Rdb_key_def *sk_descr,
-                                   Item *pk_index_cond) {
+uint Rdb_vector_db_handler::search(Rdb_vector_index *index,
+                                   const Rdb_key_def *sk_descr) {
   assert((m_search_type == FB_VECTOR_SEARCH_INDEX_SCAN) ||
          (m_search_type == FB_VECTOR_SEARCH_KNN_FIRST));
 
-  if (m_search_type == FB_VECTOR_SEARCH_KNN_FIRST) {
-    return knn_search(thd, tbl, index, pk_descr, sk_descr, pk_index_cond);
-  } else {
-    return index_scan(thd, tbl, index, pk_descr, sk_descr, pk_index_cond);
-  }
-}
-
-uint Rdb_vector_db_handler::index_scan(THD *thd, const TABLE *const tbl,
-                                       Rdb_vector_index *index,
-                                       const Rdb_key_def *pk_descr,
-                                       const Rdb_key_def *sk_descr,
-                                       Item *pk_index_cond) {
   if (!m_buffer.size()) return HA_ERR_END_OF_FILE;
 
   if (m_buffer.size() < index->dimension()) {
@@ -1198,37 +980,25 @@ uint Rdb_vector_db_handler::index_scan(THD *thd, const TABLE *const tbl,
     return HA_EXIT_FAILURE;
   }
 
-  return index->index_scan(thd, tbl, pk_index_cond, m_rangePath, m_pack_buffer,
-                           m_sk_packed_tuple, m_end_key_packed_tuple, pk_descr,
-                           sk_descr, m_buffer, m_nprobe,
-                           m_index_scan_result_iter);
+  Rdb_vector_search_params params = get_search_params();
+  params.m_query_vector = &m_buffer;
+  params.m_sk_descr = sk_descr;
+
+  if (m_search_type == FB_VECTOR_SEARCH_KNN_FIRST) {
+    return knn_search(index, params);
+  } else {
+    return index->index_scan(params, m_index_scan_result_iter);
+  }
 }
 
-uint Rdb_vector_db_handler::knn_search(THD *thd, const TABLE *const tbl,
-                                       Rdb_vector_index *index,
-                                       const Rdb_key_def *pk_descr,
-                                       const Rdb_key_def *sk_descr,
-                                       Item *pk_index_cond) {
-  m_search_result.clear();
+uint Rdb_vector_db_handler::knn_search(Rdb_vector_index *index,
+                                       Rdb_vector_search_params &params) {
+  if (!m_limit) return HA_ERR_END_OF_FILE;
 
+  m_search_result.clear();
   m_vector_db_result_iter = m_search_result.cend();
 
-  if (!m_buffer.size() || !m_limit) return HA_ERR_END_OF_FILE;
-
-  if (m_buffer.size() < index->dimension()) {
-    m_buffer.resize(index->dimension(), 0.0);
-  } else if (m_buffer.size() > index->dimension()) {
-    LogPluginErrMsg(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
-                    "query vector dimension is too big for vector index");
-    return HA_EXIT_FAILURE;
-  }
-
-  Rdb_vector_search_params params{
-      .m_metric = m_metric, .m_k = m_limit, .m_nprobe = m_nprobe};
-  uint rtn =
-      index->knn_search(thd, tbl, pk_index_cond, m_rangePath, m_pack_buffer,
-                        m_sk_packed_tuple, m_end_key_packed_tuple, pk_descr,
-                        sk_descr, m_buffer, params, m_search_result);
+  uint rtn = index->knn_search(params, m_search_result);
   if (rtn) {
     return rtn;
   }
@@ -1244,6 +1014,22 @@ uint Rdb_vector_db_handler::current_key(std::string &key) const {
   } else {
     return m_index_scan_result_iter->get_key(key);
   }
+}
+
+Rdb_vector_search_params Rdb_vector_db_handler::get_search_params() const {
+  Rdb_vector_search_params params{
+      .m_thd = m_thd,
+      .m_tbl = m_tbl,
+      .m_pk_descr = m_pk_descr,
+      .m_pack_buffer = m_pack_buffer,
+      .m_sk_packed_tuple = m_sk_packed_tuple,
+      .m_end_key_packed_tuple = m_end_key_packed_tuple,
+      .m_metric = m_metric,
+      .m_k = m_limit,
+      .m_nprobe = m_nprobe,
+      .m_rangePath = m_rangePath,
+      .m_pk_index_cond = m_pk_index_cond};
+  return params;
 }
 
 }  // namespace myrocks
