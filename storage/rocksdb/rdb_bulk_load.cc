@@ -602,7 +602,7 @@ uint Rdb_bulk_load_session::complete(Rdb_bulk_load_status status, int rtn_code,
     remove_index_from_sst_partitioner();
     // delete cfs for this session
     for (const auto &pair : m_cf_indexes) {
-      rocksdb::ColumnFamilyHandle *cf = cf_manager.get_cf(pair.first).get();
+      rocksdb::ColumnFamilyHandle *cf = cf_manager.get_cf(pair.first);
       if (cf == nullptr) continue;
       rocksdb::Status s = bulk_load_rdb->DropColumnFamily(cf);
       DBUG_EXECUTE_IF("bulk_load_complete_error",

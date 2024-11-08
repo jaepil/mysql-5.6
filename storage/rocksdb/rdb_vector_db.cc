@@ -656,7 +656,7 @@ class Rdb_faiss_inverted_list : public faiss::InvertedLists {
 class Rdb_vector_index_ivf : public Rdb_vector_index {
  public:
   Rdb_vector_index_ivf(const FB_vector_index_config index_def,
-                       std::shared_ptr<rocksdb::ColumnFamilyHandle> cf_handle,
+                       rocksdb::ColumnFamilyHandle *cf_handle,
                        const Index_id index_id)
       : m_index_id{index_id}, m_index_def{index_def}, m_cf_handle{cf_handle} {}
 
@@ -700,8 +700,8 @@ class Rdb_vector_index_ivf : public Rdb_vector_index {
        order of distance from the query vector
      */
     index_scan_result_iter.reset(new Rdb_vector_list_iterator(
-        std::move(context), m_index_id, m_cf_handle.get(),
-        m_index_l2->code_size, std::move(vector_ids)));
+        std::move(context), m_index_id, m_cf_handle, m_index_l2->code_size,
+        std::move(vector_ids)));
 
     return HA_EXIT_SUCCESS;
   }
@@ -887,7 +887,7 @@ class Rdb_vector_index_ivf : public Rdb_vector_index {
  private:
   Index_id m_index_id;
   FB_vector_index_config m_index_def;
-  std::shared_ptr<rocksdb::ColumnFamilyHandle> m_cf_handle;
+  rocksdb::ColumnFamilyHandle *m_cf_handle = nullptr;
   std::atomic<uint> m_hit{0};
   std::unique_ptr<faiss::IndexFlatL2> m_quantizer;
   std::unique_ptr<faiss::IndexIVF> m_index_l2;
@@ -954,7 +954,7 @@ class Rdb_vector_index_ivf : public Rdb_vector_index {
 uint create_vector_index(Rdb_cmd_srv_helper &cmd_srv_helper,
                          const std::string &db_name,
                          const FB_vector_index_config index_def,
-                         std::shared_ptr<rocksdb::ColumnFamilyHandle> cf_handle,
+                         rocksdb::ColumnFamilyHandle *cf_handle,
                          const Index_id index_id,
                          std::unique_ptr<Rdb_vector_index> &index) {
   if (index_def.type() == FB_VECTOR_INDEX_TYPE::FLAT ||
@@ -976,7 +976,7 @@ uint create_vector_index(Rdb_cmd_srv_helper &cmd_srv_helper [[maybe_unused]],
                          const std::string &db_name [[maybe_unused]],
                          const FB_vector_index_config index_def
                          [[maybe_unused]],
-                         std::shared_ptr<rocksdb::ColumnFamilyHandle> cf_handle
+                         rocksdb::ColumnFamilyHandle *cf_handle
                          [[maybe_unused]],
                          const Index_id index_id [[maybe_unused]],
                          std::unique_ptr<Rdb_vector_index> &index) {

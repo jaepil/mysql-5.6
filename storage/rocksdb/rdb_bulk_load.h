@@ -147,9 +147,7 @@ class Rdb_bulk_load_session {
   void remove_index_from_sst_partitioner() {
     for (const auto &pair : m_cf_indexes) {
       rocksdb::ColumnFamilyHandle *cf =
-          rdb_get_cf_manager()
-              .get_cf(convert_temp_cf_to_cf_name(pair.first))
-              .get();
+          rdb_get_cf_manager().get_cf(convert_temp_cf_to_cf_name(pair.first));
       auto *const sst_partitioner_factory =
           rdb_get_rocksdb_db()->GetOptions(cf).sst_partitioner_factory.get();
       auto *const rdb_sst_partitioner_factory =

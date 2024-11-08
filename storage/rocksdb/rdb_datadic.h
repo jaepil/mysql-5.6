@@ -444,7 +444,7 @@ class Rdb_key_def {
   Rdb_key_def &operator=(const Rdb_key_def &) = delete;
   Rdb_key_def(const Rdb_key_def &k);
   Rdb_key_def(uint indexnr_arg, uint keyno_arg,
-              std::shared_ptr<rocksdb::ColumnFamilyHandle> cf_handle_arg,
+              rocksdb::ColumnFamilyHandle *cf_handle_arg,
               uint16_t index_dict_version_arg, uchar index_type_arg,
               uint16_t kv_format_version_arg, bool is_reverse_cf_arg,
               bool is_per_partition_cf, const char *name,
@@ -649,9 +649,7 @@ class Rdb_key_def {
     return *m_cf_handle;
   }
 
-  std::shared_ptr<rocksdb::ColumnFamilyHandle> get_shared_cf() const {
-    return m_cf_handle;
-  }
+  rocksdb::ColumnFamilyHandle *get_shared_cf() const { return m_cf_handle; }
 
   bool is_vector_index() const {
     return m_vector_index_config.type() != FB_VECTOR_INDEX_TYPE::NONE;
@@ -871,7 +869,7 @@ class Rdb_key_def {
 
   uchar m_index_number_storage_form[INDEX_NUMBER_SIZE];
 
-  std::shared_ptr<rocksdb::ColumnFamilyHandle> m_cf_handle;
+  rocksdb::ColumnFamilyHandle *m_cf_handle = nullptr;
 
   FB_vector_index_config m_vector_index_config{};
 
