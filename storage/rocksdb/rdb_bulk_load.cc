@@ -564,14 +564,14 @@ uint Rdb_bulk_load_session::add_table(
   }
   if (type == Rdb_bulk_load_type::TEMPORARY_RDB) {
     if (!cf_manager.get_or_create_cf(
-            bulk_load_rdb, convert_cf_to_temp_cf_name(DEFAULT_CF_NAME))) {
+            convert_cf_to_temp_cf_name(DEFAULT_CF_NAME))) {
       LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
                       "Fail to create/get default cf");
       return HA_EXIT_FAILURE;
     }
     for (const auto &cf_name : non_default_cf) {
       std::string temp_cf_name = convert_cf_to_temp_cf_name(cf_name);
-      if (!cf_manager.get_or_create_cf(bulk_load_rdb, temp_cf_name)) {
+      if (!cf_manager.get_or_create_cf(temp_cf_name)) {
         LogPluginErrMsg(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
                         "Fail to create/get cf %s", temp_cf_name.c_str());
         return HA_EXIT_FAILURE;
